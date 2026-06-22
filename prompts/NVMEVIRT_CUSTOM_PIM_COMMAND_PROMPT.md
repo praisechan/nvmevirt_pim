@@ -1,89 +1,76 @@
-# Task Prompt: Custom NVMe Page-List Command for NVMeVirt, Driven by SPDK
+# Task Prompt: Vendor NVMe Page-List Command for NVMeVirt, Driven by SPDK
 
-> Use this file as the complete task specification. You are working from a clean,
-> stock NVMeVirt checkout (https://github.com/snu-csl/nvmevirt). Assume none of
-> the previous trial implementations, reports, scripts, or local modifications
-> exist. Implement only the feature described here, then verify the single
-> required gate. Do not add alternate experiments, read-path shortcuts, MDTS
-> tricks, extra controller modes, or broad parameter sweeps unless they are
-> needed to debug a failing gate.
+> Use this as the complete task specification. Start from a clean, stock NVMeVirt checkout
+> (https://github.com/snu-csl/nvmevirt). Assume none of the previous trial code, reports, scripts,
+> or local design history exists. Implement only the custom command below and verify the single
+> required gate. Do not add read-path shortcuts, MDTS tricks, io_uring/fio comparisons, dispatcher
+> scaling studies, figures, or broad sweeps unless they are needed to debug a failing gate.
 
 ---
 
 ## 0. Goal
 
-Add one vendor-specific NVMe I/O command to NVMeVirt. The host sends a single
-command whose PRP data buffer contains a list of page IDs (LPNs). NVMeVirt
-copies that page-id list from host memory, then expands the one command inside
-the controller into one NAND read/sense per listed LPN. The important behavior
-is that the device model charges those NAND reads against the addressed LUNs
-using NVMeVirt's existing `ssd_advance_nand()` timing model, so page IDs that
-map to distinct LUNs run in parallel.
+Add one vendor-specific NVMe I/O command. The host submits a single command whose PRP data buffer
+contains a list of page IDs (LPNs). NVMeVirt copies that page-id list from host memory, then expands
+the one command inside the controller into one NAND read/sense per listed LPN, using the existing
+`conv_ftl` mapping logic and `ssd_advance_nand()` timing model.
 
-For the configured geometry, 16 channels x 32 LUNs/channel x 1 plane/LUN gives
-512 independent LUNs. Therefore a single custom command carrying the 512 LPNs
-`0..511` should activate all 512 LUNs/planes in one modeled round. The required
-gate is: the device-observed latency printed by NVMeVirt for that single
-512-page command converges near the configured NAND read latency, about 30 us,
-not 512 x 30 us. The host benchmark must use SPDK so it can submit the vendor
-opcode directly and avoid kernel block-layer command overhead.
+Configure the SSD as 16 channels x 32 LUNs/channel x 1 plane/LUN = 512 independent LUNs. With the
+page list `0..511`, one command should activate all 512 LUNs/planes in one modeled round. The
+acceptance gate is that NVMeVirt's device-observed latency for that single 512-page command
+converges near the 30 us NAND read-latency level (allowing the small channel/model overhead), not
+near 512 x 30 us. Drive the command from SPDK so the host can emit the vendor opcode directly.
 
 ---
 
 ## 1. Scope and Non-Goals
 
 Implement:
-- one SSD profile for the 512-LUN geometry;
-- one vendor-specific I/O opcode shared by host and device;
-- one `conv_ftl.c` handler that PRP-reads a `uint64_t` LPN list and fans out
-  existing NAND timing calls;
-- one `io.c` data-copy branch for the custom command's tiny result;
+- one 512-LUN conventional-SSD profile;
+- one shared vendor I/O opcode;
+- one `conv_ftl.c` handler that PRP-reads a `uint64_t` LPN list and fans out existing NAND timing;
+- one minimal `io.c` custom-opcode branch so the io_worker does not perform normal read/write data
+  movement for this command;
 - one SPDK benchmark that submits the raw command and records host latency;
-- one guarded run script or exact runbook that builds, loads, prepopulates,
-  binds SPDK, runs the gate, captures `dmesg`, and restores the kernel driver.
+- one exact runbook or `RUN=1`-guarded script for build, load, prepopulate, SPDK bind, identify,
+  gate run, `dmesg` capture, and driver restore.
 
 Do not implement:
 - automatic all-plane expansion on normal `nvme_cmd_read`;
-- MDTS-based large-read experiments;
-- io_uring/fio comparisons;
-- dispatcher/io_worker scaling studies;
-- arbitrary workload emulation or ANNS logic;
-- plots or sweeps as required deliverables.
+- raising MDTS or testing large standard reads;
+- alternate host stacks;
+- ANNS/workload logic;
+- required plots or parameter sweeps.
 
-Small diagnostic runs are fine only when the gate fails or to prevent a false
-positive, but they must not become part of the required implementation.
+Small diagnostics are fine only to explain a failing gate or avoid a false pass; keep them out of
+the required deliverables.
 
 ---
 
 ## 2. Target Machine and Runtime Setup
 
 Machine:
-- CPU: i9-13900F, 32 logical CPUs. Use P-cores for NVMeVirt kthreads and
-  E-cores for the SPDK host benchmark.
-- Reserved memory for NVMeVirt: boot with `memmap=16G$96G`, then load the
-  module with `memmap_start=96G memmap_size=16G`.
-- Treat the GRUB edit and reboot as user actions. Surface them explicitly.
+- CPU: i9-13900F, 32 logical CPUs. Use P-cores for NVMeVirt kthreads and E-cores for SPDK.
+- Reserved memory: user must boot with `memmap=16G$96G`; load NVMeVirt with
+  `memmap_start=96G memmap_size=16G`.
+- Surface GRUB/reboot and privileged commands as user actions; do not assume passwordless `sudo`.
 
 Core placement:
-- Load NVMeVirt with disjoint P-core kthreads, for example `cpus=7,8` for one
-  dispatcher and one io_worker.
-- Run the SPDK benchmark on E-cores, for example `taskset -c 16-31`.
-- Do not share a core between the host poller and NVMeVirt kthreads.
+- Example NVMeVirt load: `cpus=7,8` for one dispatcher and one io_worker.
+- Example host pinning: `taskset -c 16-31`.
+- The SPDK poller and NVMeVirt kthreads must not share a core.
 
 Device path:
-- While bound to the kernel `nvme` driver, the device should enumerate as
-  `/dev/nvme1n1`. Use this phase for prepopulation.
-- Binding to SPDK removes `/dev/nvme1n1`; restore it with SPDK reset after the
-  benchmark.
+- Under the kernel `nvme` driver, expect `/dev/nvme1n1`; use this phase for prepopulation.
+- SPDK binding removes `/dev/nvme1n1`; restore the kernel driver with SPDK reset after testing.
 
 ---
 
 ## 3. SSD Profile
 
-Add a profile in `ssd_config.h` for a conventional SSD namespace using
-`conv_ftl`.
+Add a conventional-SSD (`conv_ftl`) profile in `ssd_config.h`.
 
-Geometry and timing:
+Required constants:
 - `SSD_PARTITIONS = 1`
 - `NAND_CHANNELS = 16`
 - `LUNS_PER_NAND_CH = 32`
@@ -93,113 +80,86 @@ Geometry and timing:
 - all NAND read latency constants = `30000` ns
 - `NAND_CHANNEL_BANDWIDTH = 800` MB/s
 - `FW_CH_XFER_LATENCY = 0`
-- `MDTS = 6` is acceptable because the custom command's page count is not a
-  normal NLB field.
+- `MDTS = 6` is fine; the custom command page count is not a normal NLB field.
+- keep capacity inside the 16 GiB reserved memmap while leaving enough pages for at least LPNs
+  `0..511` and ordinary metadata.
 
-Capacity:
-- Keep the configured capacity within the 16 GiB reserved memmap.
-- It only needs enough mapped pages to cover at least the 512 tested LPNs, plus
-  ordinary metadata/headroom. Do not over-provision just for future tests.
-
-New constants:
+New task constants:
 - `INFLASH_PIM_OPCODE = 0x91`
-- `COMPUTE_RESULT_SIZE = 64`
 - `INFLASH_PIM_MAX_PAGES = 512`
+- `COMPUTE_RESULT_SIZE = 64`
 
-Put the opcode definition in one shared header visible to both the device code
-and the host benchmark, or duplicate it only with an explicit compile-time or
-runtime check that the values match. Avoid scattering magic `0x91` literals.
+`COMPUTE_RESULT_SIZE` is the small per-page internal channel-transfer size charged in the NAND model.
+It is not a host page-data transfer. Define the opcode in one shared header if practical; otherwise
+duplicate it only with an explicit host/device value check. Do not scatter magic `0x91` literals.
 
 ---
 
 ## 4. Stock NVMeVirt Anchors to Read First
 
-Read the clean tree before editing and use the local code's exact types.
+Read these in the clean tree and follow the local types exactly:
+- `io.c`: `__nvmev_proc_io()` gets SQ entries and calls the namespace handler.
+- `conv_ftl.c`: `conv_proc_nvme_io_cmd()` switches on `cmd->common.opcode`; add
+  `case INFLASH_PIM_OPCODE:` and call `conv_inflash_compute()`.
+- `conv_ftl.c`: mirror `conv_read()` for map lookup, unmapped/invalid-PPA skip, `struct nand_cmd`,
+  `ssd_advance_nand()`, max completion time, and `ret->nsecs_target`.
+- `io.c`: reuse the PRP walker idiom from `__do_perform_io()` (`cmd->prp1`/`prp2`,
+  `kmap_atomic_pfn(PRP_PFN(paddr))` or `memremap()`, page offset, `memcpy`) to read the host LPN list.
+- `nvme.h`: use the command union through `cmd->common`; read `cdw10[0]` with endian conversion,
+  e.g. `le32_to_cpu(cmd->common.cdw10[0])`.
 
-Device command routing:
-- `io.c`: `__nvmev_proc_io()` obtains SQ entries and calls the namespace
-  handler.
-- `conv_ftl.c`: `conv_proc_nvme_io_cmd()` switches on `cmd->common.opcode`.
-  Add `case INFLASH_PIM_OPCODE:` here and call `conv_inflash_compute()`.
-
-NAND timing pattern:
-- `conv_ftl.c`: mirror the inner timing behavior of `conv_read()`.
-- For each requested LPN, map the LPN with `get_maptbl_ent()`.
-- Skip unmapped or invalid PPAs, exactly as the normal read path does.
-- Build `struct nand_cmd` with `.type = USER_IO`, `.cmd = NAND_READ`,
-  `.stime = req->nsecs_start`, `.xfer_size = COMPUTE_RESULT_SIZE`,
-  `.interleave_pci_dma = false`, and `.ppa = &ppa`.
-- Call `ssd_advance_nand()` and set `ret->nsecs_target` to the maximum
-  completion time over all sensed pages.
-
-Host-memory copy pattern:
-- `io.c`: `__do_perform_io()` already walks PRP1/PRP2, maps host physical pages
-  with `kmap_atomic_pfn(PRP_PFN(paddr))` or `memremap()`, applies page offsets,
-  and copies bytes.
-- Reuse that PRP-walk idiom for the controller-side DMA-read of the page-id
-  list. Do not assume the SPDK buffer is virtually addressable in the kernel.
-
-Important type detail:
-- In NVMeVirt's command union, the vendor command should be read through
-  `cmd->common`. Use little-endian helpers where appropriate, e.g.
-  `le32_to_cpu(cmd->common.cdw10[0])`.
+Do not assume the SPDK buffer has a kernel virtual address. The controller-side "DMA read" is a PRP
+walk and host-physical copy inside NVMeVirt.
 
 ---
 
 ## 5. Custom Command Contract
 
 Opcode:
-- I/O opcode `INFLASH_PIM_OPCODE = 0x91`.
+- `INFLASH_PIM_OPCODE = 0x91`.
+- Keep the opcode low bits as host-to-controller data transfer (`01b`), because the command's PRP
+  buffer is an input page-id list.
 
 Command dwords:
-- `cdw10[0]`: number of LPNs, `N`.
-- `cdw10[1]`: optional flags, initially zero. Reject nonzero flags unless you
-  implement them.
-- Do not overload `rw.slba` or `rw.length`; those fields are not part of this
-  command's semantic contract.
+- `cdw10[0] = N`, the number of LPNs in the list.
+- `cdw10[1] = 0` for now; reject nonzero flags unless you actually implement them.
+- Do not overload `rw.slba`, `rw.length`, NLB, or MDTS for this command.
 
 Data buffer:
-- The PRP data buffer starts as `N` contiguous little-endian `uint64_t` LPNs.
-- For the required gate, `N = 512` and the list is `0, 1, ..., 511`.
-- The same buffer may receive a tiny completion result after the device has
-  already copied the input list into kernel memory.
-
-Transfer lengths:
-- Device-side input copy length: `N * sizeof(uint64_t)`.
-- io_worker result copy length: exactly `COMPUTE_RESULT_SIZE`, independent of
-  `N`.
-- Host SPDK command transfer length should be at least
-  `max(N * sizeof(uint64_t), COMPUTE_RESULT_SIZE)` so the same DMA buffer can
-  hold the input list and the result without relying on undefined behavior.
-  For `N <= 512`, this is at most 4096 bytes.
+- PRP1/PRP2 describe `N` contiguous little-endian `uint64_t` LPNs.
+- For the required gate, `N = 512` and the list is exactly `0, 1, ..., 511`.
+- Host transfer length is `N * sizeof(uint64_t)`; for `N <= 512` this is at most 4096 bytes. Use a
+  4096-byte-aligned `spdk_zmalloc()` buffer so the 512-entry list is one page.
 
 Completion:
-- Return normal NVMe success when all valid listed pages have been charged.
-- Result content is not under test. It may be zeros or a simple fixed pattern.
-- Set `ret->status = NVME_SC_SUCCESS`; use an invalid-field or internal-error
-  status for malformed `N`, PRPs, or out-of-range LPNs.
+- No host data result buffer is required. Put useful debug information in completion dwords, e.g.
+  `result0 = sensed_pages` and `result1 = requested_pages`, if NVMeVirt's completion path supports it.
+- Return success for a well-formed command after all valid listed pages are charged.
+- Return an existing invalid-field/internal-error status for malformed `N`, bad PRPs, or out-of-range
+  LPNs. Unmapped-but-in-range LPNs may be skipped like `conv_read()`, but the gate must not pass unless
+  all 512 are sensed.
 
 ---
 
 ## 6. Device Implementation
 
-Add `conv_inflash_compute(struct nvmev_ns *ns, struct nvmev_request *req,
-struct nvmev_result *ret)` in `conv_ftl.c`.
+Add `conv_inflash_compute(struct nvmev_ns *ns, struct nvmev_request *req, struct nvmev_result *ret)`
+in `conv_ftl.c`.
 
 Required behavior:
-1. Read `N = le32_to_cpu(req->cmd->common.cdw10[0])`.
-2. Reject `N == 0` and `N > INFLASH_PIM_MAX_PAGES`.
-3. Allocate or stack-store a bounded `u64 lpns[INFLASH_PIM_MAX_PAGES]`.
-4. PRP-copy `N * sizeof(u64)` bytes from host memory into `lpns`.
-5. Validate each LPN against the namespace/FTL page range before using it.
-6. For each mapped, valid LPN, issue one existing NAND read timing operation
-   using the same `stime = req->nsecs_start`.
-7. Track both `requested = N` and `sensed = number of mapped/valid pages that
-   actually called `ssd_advance_nand()`.
-8. Set `ret->nsecs_target` to the max NAND completion time. If no page was
-   sensed, complete successfully at `req->nsecs_start` but print `sensed 0`
-   so a missing prepopulation cannot pass.
-9. Print the device-latency observer:
+1. Read `N = le32_to_cpu(req->cmd->common.cdw10[0])`; reject `N == 0` or `N > INFLASH_PIM_MAX_PAGES`.
+2. Copy `N * sizeof(u64)` bytes from the command PRPs into a bounded kernel array
+   `u64 lpns[INFLASH_PIM_MAX_PAGES]`.
+3. Validate each LPN against the FTL namespace range before use.
+4. For each mapped, valid LPN, perform the same single-page timing operation `conv_read()` would:
+   build `struct nand_cmd { .type = USER_IO, .cmd = NAND_READ, .stime = req->nsecs_start,
+   .xfer_size = COMPUTE_RESULT_SIZE, .interleave_pci_dma = false, .ppa = &ppa }`, call
+   `ssd_advance_nand()`, and keep the max completion time.
+5. Track `requested = N` and `sensed = number of pages that actually called ssd_advance_nand()`.
+6. Set `ret->nsecs_target` to the max completion time; if `sensed == 0`, complete at
+   `req->nsecs_start` so the log clearly exposes a false prepopulation.
+7. Set `ret->status = NVME_SC_SUCCESS` for success and completion result dwords if available.
+8. Print the observer:
 
 ```c
 printk_ratelimited(KERN_INFO
@@ -207,181 +167,134 @@ printk_ratelimited(KERN_INFO
     ret->nsecs_target - req->nsecs_start, requested, sensed);
 ```
 
-Critical timing requirement:
-- Every listed page uses the same base `stime = req->nsecs_start`.
-- Do not update `stime` between pages. Distinct LUNs must overlap naturally
-  through `ssd_advance_nand()`, while repeated pages on the same LUN should
-  serialize naturally through that LUN's `next_lun_avail_time`.
+Critical timing rule: every listed page uses the same base `stime = req->nsecs_start`. Do not advance
+`stime` in the loop. Distinct LUNs then overlap through the existing model; repeated pages on the same
+LUN naturally serialize through that LUN's `next_lun_avail_time`.
 
-Localized changes only:
-- Add the opcode to the opcode enum/string table if that is how the clean tree
-  reports opcodes.
-- Add one dispatch case in `conv_proc_nvme_io_cmd()`.
-- Do not change `conv_read()` or `conv_write()` semantics.
-- Do not alter `ssd_advance_nand()` unless the clean tree requires a trivial
-  compile fix for the new call site.
+Keep changes localized: opcode enum/string if needed, one dispatch case, one new handler. Do not
+change `conv_read()`, `conv_write()`, or `ssd_advance_nand()` semantics.
 
 ---
 
-## 7. io_worker Result Copy
+## 7. io_worker Handling
 
-In `io.c`, add a minimal branch in the existing data-copy path for
-`INFLASH_PIM_OPCODE`.
+Add a minimal custom-opcode branch in `io.c`'s data-copy path.
 
 Required behavior:
-- Copy exactly `COMPUTE_RESULT_SIZE` bytes from the namespace/device-side
-  backing area or a small fixed result source into the command PRP buffer.
-- Do not copy `N * 4096` bytes and do not copy page data for the listed LPNs.
-- Do not derive the custom command's copy length from `rw.length`.
-- Preserve normal write/read behavior for standard opcodes.
+- For `INFLASH_PIM_OPCODE`, do not derive offset or length from `struct nvme_rw_command`.
+- Do not copy normal page data to or from the namespace backing store.
+- Return zero copied bytes, or otherwise skip the io_worker data movement while still allowing the
+  normal completion path to run at `ret->nsecs_target`.
+- Preserve all standard read/write behavior.
 
-If the clean tree has both CPU-copy and DMA-copy io_worker paths, either:
-- route the custom opcode through the CPU-copy path only, or
-- add equivalent custom-length handling to both paths.
-
-The important invariant is one host command, one tiny host result transfer.
+If the clean tree can use both CPU-copy and DMA-copy io_worker paths, make sure the custom opcode
+cannot accidentally enter a path that interprets `rw.length` and performs a fake read/write transfer.
 
 ---
 
 ## 8. SPDK Host Benchmark
 
-Create `host/inflash_bench_spdk.c` and a small `host/Makefile` target.
+Create `host/inflash_bench_spdk.c` and a small build target.
 
-Required benchmark behavior:
-- Initialize SPDK with a core mask suitable for E-cores.
-- Probe and attach exactly the target BDF.
-- Open namespace 1 and allocate one I/O qpair.
-- Allocate one DMA buffer with `spdk_zmalloc()`.
-- Fill the first `N` entries with little-endian `uint64_t` LPNs.
-- Submit one raw I/O command with `spdk_nvme_ctrlr_cmd_io_raw()` or the current
-  SPDK equivalent:
-  - `opcode = INFLASH_PIM_OPCODE`
-  - `nsid = 1`
-  - `cdw10 = N`
-  - transfer buffer = the DMA buffer
-  - transfer length = `max(N * sizeof(uint64_t), COMPUTE_RESULT_SIZE)`
+Required behavior:
+- Initialize SPDK, probe only the selected BDF, open namespace 1, and allocate one I/O qpair.
+- Allocate a 4096-byte-aligned DMA buffer with `spdk_zmalloc()` and fill `N` little-endian `uint64_t`
+  LPNs.
+- Submit a raw I/O command (`spdk_nvme_ctrlr_cmd_io_raw()` or the current SPDK equivalent):
+  `opcode = INFLASH_PIM_OPCODE`, `nsid = 1`, `cdw10 = N`, buffer = LPN list, length =
+  `N * sizeof(uint64_t)`.
 - Busy-poll `spdk_nvme_qpair_process_completions()` until the callback fires.
-- Record host end-to-end latency from just before submission to callback.
+- Record host e2e latency from just before submission to callback.
 
 CLI:
 - `--bdf <BDF>`
 - `--npages N`
-- `--qdepth Q` (only `Q=1` is required for the gate)
+- `--qdepth Q` (only `Q=1` is required; reject other values if that keeps the benchmark simpler)
 - `--trials T`
 - `--csv <path>`
-- optional `--core-mask` if easier than relying on `taskset`.
+- optional `--core-mask`
 
-CSV schema:
-- `host_stack,n_pages,qdepth,trial,t_e2e_ns,status`
+CSV schema: `host_stack,n_pages,qdepth,trial,t_e2e_ns,status`.
 
-For the gate, run `--npages 512 --qdepth 1 --trials 15`, with the page list
-`0..511`.
+For the gate, run `--npages 512 --qdepth 1 --trials 15` with page list `0..511`.
 
 ---
 
 ## 9. Prepopulation
 
-Prepopulation is mandatory. Unmapped LPNs are skipped by `conv_ftl`, which would
-produce a false near-zero device latency.
+Prepopulation is mandatory. Unmapped LPNs are skipped by the FTL and would fabricate a false near-zero
+latency.
 
-Required:
-- While the device is bound to the kernel `nvme` driver, write at least LPNs
-  `0..511` on `/dev/nvme1n1`.
-- Use a simple deterministic write, for example `dd` or `fio`, with direct I/O
-  if convenient.
-- After prepopulation, bind the device to SPDK and run the benchmark.
-- The gate only passes if the device log says `requested 512 pages, sensed 512
-  pages`.
+Before SPDK binding, while `/dev/nvme1n1` exists under the kernel driver, write at least LPNs `0..511`.
+A simple direct write is sufficient, for example:
 
-Do not rely on the custom command itself to populate mappings.
+```bash
+sudo dd if=/dev/zero of=/dev/nvme1n1 bs=4K count=512 oflag=direct status=none
+```
 
----
-
-## 10. SPDK Feasibility Gate Before Benchmarking
-
-Before running the custom benchmark:
-1. Find the PCI BDF:
-   `ls -l /sys/block/nvme1n1/device` or `lspci | grep -i non-volatile`.
-2. Run SPDK setup status.
-3. Bind only the NVMeVirt BDF to userspace.
-4. Prefer `uio_pci_generic`. NVMeVirt's software PCI device may not have an
-   IOMMU group, so `vfio-pci` can fail even when the device is otherwise usable.
-5. Run SPDK identify:
-   `sudo spdk/build/examples/identify -r "trtype:PCIe traddr:<BDF>"`.
-
-If identify cannot enumerate the controller, stop and report the exact failure.
-The custom benchmark cannot be interpreted without this step.
-
-Remember:
-- SPDK setup may reserve hugepages; record the count used.
-- SPDK binding removes `/dev/nvme1n1`.
-- Run `sudo spdk/scripts/setup.sh reset` at the end to restore the kernel
-  driver.
+The gate only passes if the device log says `requested 512 pages, sensed 512 pages`. Do not rely on
+the custom command to create mappings.
 
 ---
 
-## 11. Minimal Build and Runbook
+## 10. SPDK Feasibility Check
+
+Before benchmarking:
+1. Find the BDF: `ls -l /sys/block/nvme1n1/device` or `lspci | grep -i non-volatile`.
+2. Check SPDK setup status and bind only that BDF to userspace.
+3. Prefer `uio_pci_generic`; NVMeVirt's software PCI device may lack an IOMMU group, so `vfio-pci`
+   can fail even when the device is usable.
+4. Run: `sudo spdk/build/examples/identify -r "trtype:PCIe traddr:<BDF>"`.
+
+If identify cannot enumerate the controller, stop and report the exact failure. Record the hugepage
+reservation used by SPDK. Run `sudo spdk/scripts/setup.sh reset` at the end to restore the kernel
+driver.
+
+---
+
+## 11. Minimal Runbook
 
 ```bash
 cd <clean-nvmevirt>
-
-# Build NVMeVirt and the SPDK benchmark.
 make
 make -C host SPDK_DIR=<path-to-spdk>
 
-# Load under the kernel driver and prepopulate.
 sudo insmod nvmev.ko memmap_start=96G memmap_size=16G cpus=7,8
-dmesg | tail -50 | grep -iE 'nvmev|tt_luns|luns'
-# Confirm 512 LUNs and /dev/nvme1n1.
-
-# Prepopulate LPNs 0..511, then find the BDF.
+dmesg | tail -50 | grep -iE 'nvmev|tt_luns|luns'   # confirm 512 LUNs and /dev/nvme1n1
 sudo dd if=/dev/zero of=/dev/nvme1n1 bs=4K count=512 oflag=direct status=none
 BDF=<detected-BDF>
 
-# Bind to SPDK and smoke-test enumeration.
 sudo DRIVER_OVERRIDE=uio_pci_generic PCI_ALLOWED="$BDF" spdk/scripts/setup.sh
 sudo spdk/build/examples/identify -r "trtype:PCIe traddr:$BDF"
 
-# Run the required gate. Clear dmesg immediately before the gate run.
 sudo dmesg -C
 sudo taskset -c 16-31 host/inflash_bench_spdk --bdf "$BDF" \
   --npages 512 --qdepth 1 --trials 15 --csv results_pim_spdk.csv
 dmesg | grep inflash_dev_lat
 
-# Restore kernel driver.
 sudo spdk/scripts/setup.sh reset
 ```
-
-If root privileges or GRUB changes are required, ask the user to perform them.
-Do not assume passwordless `sudo`.
 
 ---
 
 ## 12. Expected Timing
 
-Source of truth:
-- The gate is based on NVMeVirt's device-observed line:
-  `inflash_dev_lat <ns> (requested 512 pages, sensed 512 pages)`.
-- Host SPDK latency is reported alongside, but it is not the primary pass/fail
-  value.
+Source of truth: `dmesg` line
+`inflash_dev_lat <ns> (requested 512 pages, sensed 512 pages)`.
 
-Why it should converge:
-- All 512 listed LPNs use the same `req->nsecs_start`.
-- Consecutive LPNs written during prepopulation should stripe across the
-  16 x 32 LUN geometry in the existing `conv_ftl` write-pointer order.
-- Each LUN receives one NAND read, so the per-LUN timelines overlap.
-- With all read latencies set to 30000 ns and only a 64-byte per-page channel
-  transfer, the modeled device latency should be close to 30000 ns plus a small
-  channel/model overhead.
+All 512 listed LPNs use the same `req->nsecs_start`. Consecutive prepopulated LPNs `0..511` should
+stripe across the 16 x 32 LUN geometry in the existing write-pointer order, one page per LUN. With
+read latency set to 30000 ns and only 64 bytes of modeled internal result transfer per page, the
+device latency should be close to the 30 us level plus a small additive channel/model cost. A result
+around 30-40 us is plausible; a result near 15.36 ms is not.
 
-Accept a small additive overhead; reject any result that is near 512 x 30000 ns
-or any result where `sensed` is less than 512.
+Host SPDK latency is reported alongside, but the device-observed line is the pass/fail source.
 
 ---
 
 ## 13. Required Verification Gate
 
-Run exactly the required all-plane command:
+Run exactly:
 - prepopulated LPNs: `0..511`
 - command page list: `0..511`
 - `N = 512`
@@ -390,75 +303,45 @@ Run exactly the required all-plane command:
 - host path: SPDK raw command
 
 Pass criteria:
-- Module builds and loads with the 512-LUN profile.
-- SPDK identify enumerates the device after userspace binding.
-- `dmesg` contains at least one line for the gate run with:
-  - `requested 512 pages`
-  - `sensed 512 pages`
-  - device latency near the 30 us level, not near 15.36 ms.
-- The CSV contains 15 successful SPDK trials for the same command.
-- The final report states the median/min/max device-observed latency from the
-  captured `dmesg` lines and the median host e2e latency from the CSV.
+- module builds and loads with the 512-LUN profile;
+- SPDK identify enumerates after userspace binding;
+- CSV contains 15 successful SPDK trials;
+- `dmesg` for the gate run contains `requested 512 pages, sensed 512 pages`;
+- device-observed latency is near the 30 us level, not proportional to 512 pages;
+- final notes report the exact `dmesg` latency line(s) and the host median/min/max from the CSV.
 
 Failure conditions:
-- `sensed < 512`: prepopulation or LPN mapping is wrong.
-- SPDK identify fails: host path is not ready; stop and report.
-- Device latency scales with 512 x tR: the fan-out is serialized or `stime` is
-  being advanced incorrectly.
-- Host transfer length scales as page data (`512 * 4096`): the custom command is
-  not preserving O(1) host data movement.
+- `sensed < 512`: prepopulation, LPN list, or mapping is wrong.
+- SPDK identify fails: host path is not ready.
+- Device latency scales toward `512 * tR`: fan-out is serialized or loop `stime` is wrong.
+- io_worker copies normal page data: the custom command no longer preserves O(1) host data movement.
 
 ---
 
 ## 14. Deliverables
 
-1. Device changes:
-   - profile/config constants;
-   - opcode definition;
-   - `conv_inflash_compute()`;
-   - dispatch case;
-   - custom io_worker result-copy length.
-2. Host changes:
-   - `host/inflash_bench_spdk.c`;
-   - `host/Makefile` target or documented build command.
-3. Run support:
-   - either a `RUN=1`-guarded script or exact command transcript for build,
-     load, prepopulate, bind, identify, benchmark, `dmesg`, and reset.
-4. Results:
-   - `results_pim_spdk.csv`;
-   - the relevant `dmesg` lines;
-   - a short report with the gate verdict.
+1. Device code: profile constants, opcode definition, `conv_inflash_compute()`, dispatch case, and custom io_worker skip branch.
+2. Host code: `host/inflash_bench_spdk.c` and build target/command.
+3. Run support: script or exact transcript for build, load, prepopulate, bind, identify, benchmark, `dmesg`, and reset.
+4. Results: `results_pim_spdk.csv`, relevant `dmesg` lines, and a short gate verdict.
 
-Keep the report focused on the gate. Mention SPDK/uio feasibility and the exact
-latency numbers. Do not add figures unless the user asks.
+Keep the report focused on the gate and SPDK/uio feasibility. Do not add figures unless asked.
 
 ---
 
 ## 15. Acceptance Checklist
 
-- [ ] Clean NVMeVirt tree builds after the localized changes.
-- [ ] New profile reports 512 LUNs/planes and fits inside the 16 GiB memmap.
-- [ ] Normal prepopulation writes still work through `/dev/nvme1n1`.
-- [ ] SPDK binds with `uio_pci_generic` and identify enumerates the controller.
-- [ ] The SPDK benchmark issues opcode `0x91` with `cdw10[0] = 512`.
-- [ ] NVMeVirt PRP-reads exactly the 512-entry LPN list from host memory.
-- [ ] The gate run prints `requested 512 pages, sensed 512 pages`.
-- [ ] Device-observed latency is near 30 us, not proportional to 512 pages.
-- [ ] Host result transfer is `COMPUTE_RESULT_SIZE`, not 512 page reads.
-- [ ] `conv_read()` and `conv_write()` behavior are unchanged.
-- [ ] SPDK reset restores the kernel driver at the end.
+Before calling the task complete, confirm: clean build; 512-LUN profile inside the 16 GiB memmap;
+prepopulation through `/dev/nvme1n1`; SPDK `uio_pci_generic` identify; opcode `0x91` with
+`cdw10[0] = 512`; exact 512-entry PRP list read; `requested 512 pages, sensed 512 pages`; device
+latency near the 30 us level; no 512-page host payload transfer; `conv_read()`/`conv_write()`
+unchanged; SPDK reset restored the kernel driver.
 
 ---
 
 ## 16. Code References
 
-- `ssd_config.h`: SSD profiles, geometry, timing constants, `MDTS`.
-- `nvme.h` or local equivalent: opcode enum/string table and command structs.
-- `io.c`: SQ processing, namespace dispatch, PRP copy implementation, io_worker
-  data copy.
-- `conv_ftl.c`: `conv_proc_nvme_io_cmd()`, `conv_read()`, map-table lookup,
-  valid-PPA checks, `ssd_advance_nand()` usage.
-- `ssd.c`: `ssd_advance_nand()`, per-LUN availability, channel transfer model.
-- SPDK APIs: `spdk_env_init`, `spdk_nvme_probe`,
-  `spdk_nvme_ctrlr_alloc_io_qpair`, `spdk_nvme_ctrlr_cmd_io_raw`,
-  `spdk_nvme_qpair_process_completions`, `spdk_zmalloc`.
+Read `ssd_config.h`, `nvme.h`, `io.c`, `conv_ftl.c`, and `ssd.c` for the local profile, command,
+dispatch, PRP-copy, FTL mapping, and timing APIs. Use SPDK's `spdk_env_init`, `spdk_nvme_probe`,
+`spdk_nvme_ctrlr_alloc_io_qpair`, `spdk_nvme_ctrlr_cmd_io_raw`,
+`spdk_nvme_qpair_process_completions`, and `spdk_zmalloc`.
