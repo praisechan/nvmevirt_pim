@@ -8,6 +8,7 @@
 #define _LINUX_NVME_H
 
 #include <linux/types.h>
+#include "inflash_pim.h"
 
 struct nvme_bar {
 	__u64 cap; /* Controller Capabilities */
@@ -323,6 +324,7 @@ struct nvme_reservation_status {
 	op(nvme_cmd_kv_store, 0x81) \
 	op(nvme_cmd_kv_append, 0x83) \
 	op(nvme_cmd_kv_retrieve, 0x90) \
+	op(nvme_cmd_inflash_pim, INFLASH_PIM_OPCODE) \
 	op(nvme_cmd_kv_delete, 0xA1) \
 	op(nvme_cmd_kv_iter_req, 0xB1) \
 	op(nvme_cmd_kv_iter_read, 0xB2) \

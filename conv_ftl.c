@@ -3,6 +3,8 @@
 #include <linux/vmalloc.h>
 #include <linux/ktime.h>
 #include <linux/sched/clock.h>
+#include <linux/highmem.h>
+#include <linux/io.h>
 
 #include "nvmev.h"
 #include "conv_ftl.h"
@@ -922,6 +924,160 @@ static bool conv_read(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 	return true;
 }
 
+static void *conv_map_prp_page(u64 paddr, bool *is_memremap)
+{
+	u64 page_paddr = paddr & PAGE_MASK;
+
+	*is_memremap = false;
+
+	if (!paddr)
+		return NULL;
+
+	if (pfn_valid(page_paddr >> PAGE_SHIFT))
+		return kmap_atomic_pfn(PRP_PFN(page_paddr));
+
+	*is_memremap = true;
+	return memremap(page_paddr, PAGE_SIZE, MEMREMAP_WT);
+}
+
+static void conv_unmap_prp_page(void *vaddr, bool is_memremap)
+{
+	if (!vaddr)
+		return;
+
+	if (is_memremap)
+		memunmap(vaddr);
+	else
+		kunmap_atomic(vaddr);
+}
+
+static bool conv_copy_from_prps(struct nvme_command *cmd, void *dst, size_t len)
+{
+	u64 prps[2] = {
+		le64_to_cpu(cmd->common.prp1),
+		le64_to_cpu(cmd->common.prp2),
+	};
+	size_t copied = 0;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(prps) && copied < len; i++) {
+		bool is_memremap = false;
+		size_t mem_offs, copy_len;
+		void *vaddr;
+
+		if (!prps[i])
+			return false;
+
+		mem_offs = prps[i] & PAGE_OFFSET_MASK;
+		copy_len = min_t(size_t, len - copied, PAGE_SIZE - mem_offs);
+
+		vaddr = conv_map_prp_page(prps[i], &is_memremap);
+		if (!vaddr)
+			return false;
+
+		memcpy((u8 *)dst + copied, (u8 *)vaddr + mem_offs, copy_len);
+		conv_unmap_prp_page(vaddr, is_memremap);
+
+		copied += copy_len;
+	}
+
+	return copied == len;
+}
+
+static bool conv_inflash_compute(struct nvmev_ns *ns, struct nvmev_request *req,
+				 struct nvmev_result *ret)
+{
+	struct conv_ftl *conv_ftls = (struct conv_ftl *)ns->ftls;
+	struct conv_ftl *conv_ftl = &conv_ftls[0];
+	struct ssdparams *spp = &conv_ftl->ssd->sp;
+	struct nvme_command *cmd = req->cmd;
+	u32 requested = le32_to_cpu(cmd->common.cdw10[0]);
+	u32 flags = le32_to_cpu(cmd->common.cdw10[1]);
+	u32 nr_parts = ns->nr_parts;
+	u32 sensed = 0;
+	u64 nsecs_latest = req->nsecs_start;
+	u64 *lpns;
+	__le64 *lpns_le;
+	size_t list_len;
+	u32 i;
+
+	if (requested == 0 || requested > INFLASH_PIM_MAX_PAGES || flags != 0) {
+		ret->status = NVME_SC_INVALID_FIELD;
+		ret->nsecs_target = req->nsecs_start;
+		return true;
+	}
+
+	lpns = kmalloc_array(INFLASH_PIM_MAX_PAGES, sizeof(*lpns), GFP_KERNEL);
+	if (!lpns) {
+		ret->status = NVME_SC_INTERNAL;
+		ret->nsecs_target = req->nsecs_start;
+		return true;
+	}
+	lpns_le = (__le64 *)lpns;
+
+	list_len = requested * sizeof(lpns[0]);
+	if (!conv_copy_from_prps(cmd, lpns, list_len)) {
+		ret->status = NVME_SC_DATA_XFER_ERROR;
+		ret->nsecs_target = req->nsecs_start;
+		goto out;
+	}
+
+	for (i = 0; i < requested; i++) {
+		u64 lpn = le64_to_cpu(lpns_le[i]);
+
+		if (!valid_lpn(&conv_ftls[lpn % nr_parts], lpn / nr_parts)) {
+			NVMEV_ERROR("%s: lpn passed FTL range (lpn=%llu tt_pgs=%lu nr_parts=%u)\n",
+				    __func__, lpn, spp->tt_pgs, nr_parts);
+			ret->status = NVME_SC_INVALID_FIELD;
+			ret->nsecs_target = req->nsecs_start;
+			ret->result = ((u64)requested << 32) | sensed;
+			goto out;
+		}
+
+		lpns[i] = lpn;
+	}
+
+	for (i = 0; i < requested; i++) {
+		u64 lpn = lpns[i];
+		u64 local_lpn = lpn / nr_parts;
+		u64 nsecs_completed;
+		struct ppa ppa;
+		struct nand_cmd srd;
+
+		conv_ftl = &conv_ftls[lpn % nr_parts];
+		ppa = get_maptbl_ent(conv_ftl, local_lpn);
+		if (!mapped_ppa(&ppa) || !valid_ppa(conv_ftl, &ppa)) {
+			NVMEV_DEBUG_VERBOSE("lpn 0x%llx not mapped to valid ppa\n", local_lpn);
+			continue;
+		}
+
+		srd = (struct nand_cmd){
+			.type = USER_IO,
+			.cmd = NAND_READ,
+			.stime = req->nsecs_start,
+			.xfer_size = COMPUTE_RESULT_SIZE,
+			.interleave_pci_dma = false,
+			.ppa = &ppa,
+		};
+
+		nsecs_completed = ssd_advance_nand(conv_ftl->ssd, &srd);
+		nsecs_latest = max(nsecs_completed, nsecs_latest);
+		sensed++;
+	}
+
+	ret->nsecs_target = sensed ? nsecs_latest : req->nsecs_start;
+	ret->status = NVME_SC_SUCCESS;
+	ret->result = ((u64)requested << 32) | sensed;
+
+	printk_ratelimited(KERN_INFO
+			   "NVMeVirt: inflash_dev_lat %llu ns (requested %u pages, sensed %u pages)\n",
+			   ret->nsecs_target - req->nsecs_start, requested, sensed);
+
+out:
+	kfree(lpns);
+	return true;
+}
+
 static bool conv_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nvmev_result *ret)
 {
 	struct conv_ftl *conv_ftls = (struct conv_ftl *)ns->ftls;
@@ -1056,6 +1212,10 @@ bool conv_proc_nvme_io_cmd(struct nvmev_ns *ns, struct nvmev_request *req, struc
 		break;
 	case nvme_cmd_read:
 		if (!conv_read(ns, req, ret))
+			return false;
+		break;
+	case nvme_cmd_inflash_pim:
+		if (!conv_inflash_compute(ns, req, ret))
 			return false;
 		break;
 	case nvme_cmd_flush:
