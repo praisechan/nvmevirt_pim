@@ -1,0 +1,148 @@
+# ch->lock contention (trylock-fail = cross-dispatcher collision)
+total_acquired 40960 total_contended 584
+# per-channel: ch acquired contended
+ch 0 2560 20
+ch 1 2560 40
+ch 2 2560 29
+ch 3 2560 37
+ch 4 2560 43
+ch 5 2560 36
+ch 6 2560 60
+ch 7 2560 33
+ch 8 2560 28
+ch 9 2560 34
+ch 10 2560 40
+ch 11 2560 49
+ch 12 2560 35
+ch 13 2560 37
+ch 14 2560 31
+ch 15 2560 32
+# per-(cpu,channel) hits: cpu ch hits  (affinity: one cpu row per ch under --chan-affine)
+cpu 0 ch 0 320
+cpu 0 ch 1 320
+cpu 0 ch 2 320
+cpu 0 ch 3 320
+cpu 0 ch 4 320
+cpu 0 ch 5 320
+cpu 0 ch 6 320
+cpu 0 ch 7 320
+cpu 0 ch 8 320
+cpu 0 ch 9 320
+cpu 0 ch 10 320
+cpu 0 ch 11 320
+cpu 0 ch 12 320
+cpu 0 ch 13 320
+cpu 0 ch 14 320
+cpu 0 ch 15 320
+cpu 1 ch 0 320
+cpu 1 ch 1 320
+cpu 1 ch 2 320
+cpu 1 ch 3 320
+cpu 1 ch 4 320
+cpu 1 ch 5 320
+cpu 1 ch 6 320
+cpu 1 ch 7 320
+cpu 1 ch 8 320
+cpu 1 ch 9 320
+cpu 1 ch 10 320
+cpu 1 ch 11 320
+cpu 1 ch 12 320
+cpu 1 ch 13 320
+cpu 1 ch 14 320
+cpu 1 ch 15 320
+cpu 2 ch 0 320
+cpu 2 ch 1 320
+cpu 2 ch 2 320
+cpu 2 ch 3 320
+cpu 2 ch 4 320
+cpu 2 ch 5 320
+cpu 2 ch 6 320
+cpu 2 ch 7 320
+cpu 2 ch 8 320
+cpu 2 ch 9 320
+cpu 2 ch 10 320
+cpu 2 ch 11 320
+cpu 2 ch 12 320
+cpu 2 ch 13 320
+cpu 2 ch 14 320
+cpu 2 ch 15 320
+cpu 3 ch 0 320
+cpu 3 ch 1 320
+cpu 3 ch 2 320
+cpu 3 ch 3 320
+cpu 3 ch 4 320
+cpu 3 ch 5 320
+cpu 3 ch 6 320
+cpu 3 ch 7 320
+cpu 3 ch 8 320
+cpu 3 ch 9 320
+cpu 3 ch 10 320
+cpu 3 ch 11 320
+cpu 3 ch 12 320
+cpu 3 ch 13 320
+cpu 3 ch 14 320
+cpu 3 ch 15 320
+cpu 4 ch 0 320
+cpu 4 ch 1 320
+cpu 4 ch 2 320
+cpu 4 ch 3 320
+cpu 4 ch 4 320
+cpu 4 ch 5 320
+cpu 4 ch 6 320
+cpu 4 ch 7 320
+cpu 4 ch 8 320
+cpu 4 ch 9 320
+cpu 4 ch 10 320
+cpu 4 ch 11 320
+cpu 4 ch 12 320
+cpu 4 ch 13 320
+cpu 4 ch 14 320
+cpu 4 ch 15 320
+cpu 5 ch 0 320
+cpu 5 ch 1 320
+cpu 5 ch 2 320
+cpu 5 ch 3 320
+cpu 5 ch 4 320
+cpu 5 ch 5 320
+cpu 5 ch 6 320
+cpu 5 ch 7 320
+cpu 5 ch 8 320
+cpu 5 ch 9 320
+cpu 5 ch 10 320
+cpu 5 ch 11 320
+cpu 5 ch 12 320
+cpu 5 ch 13 320
+cpu 5 ch 14 320
+cpu 5 ch 15 320
+cpu 6 ch 0 320
+cpu 6 ch 1 320
+cpu 6 ch 2 320
+cpu 6 ch 3 320
+cpu 6 ch 4 320
+cpu 6 ch 5 320
+cpu 6 ch 6 320
+cpu 6 ch 7 320
+cpu 6 ch 8 320
+cpu 6 ch 9 320
+cpu 6 ch 10 320
+cpu 6 ch 11 320
+cpu 6 ch 12 320
+cpu 6 ch 13 320
+cpu 6 ch 14 320
+cpu 6 ch 15 320
+cpu 7 ch 0 320
+cpu 7 ch 1 320
+cpu 7 ch 2 320
+cpu 7 ch 3 320
+cpu 7 ch 4 320
+cpu 7 ch 5 320
+cpu 7 ch 6 320
+cpu 7 ch 7 320
+cpu 7 ch 8 320
+cpu 7 ch 9 320
+cpu 7 ch 10 320
+cpu 7 ch 11 320
+cpu 7 ch 12 320
+cpu 7 ch 13 320
+cpu 7 ch 14 320
+cpu 7 ch 15 320

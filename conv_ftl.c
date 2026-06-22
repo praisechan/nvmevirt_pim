@@ -7,6 +7,11 @@
 #include "nvmev.h"
 #include "conv_ftl.h"
 
+#if defined(INFLASH_COMPUTE)
+/* Runtime sensing extent (see main.c): 512=all-plane, 1=single-plane. */
+extern unsigned int compute_sense_pages;
+#endif
+
 static inline bool last_pg_in_wordline(struct conv_ftl *conv_ftl, struct ppa *ppa)
 {
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
@@ -847,16 +852,49 @@ static bool conv_read(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 	uint64_t nsecs_completed, nsecs_latest = nsecs_start;
 	uint32_t xfer_size, i;
 	uint32_t nr_parts = ns->nr_parts;
+#if defined(INFLASH_COMPUTE)
+	uint64_t inflash_sense_pages = end_lpn - start_lpn + 1;  /* LPNs actually sensed */
+#endif
 
 	struct ppa prev_ppa;
 	struct nand_cmd srd = {
 		.type = USER_IO,
 		.cmd = NAND_READ,
 		.stime = nsecs_start,
+#if defined(INFLASH_COMPUTE)
+		.interleave_pci_dma = false,
+#else
 		.interleave_pci_dma = true,
+#endif
 	};
 
 	NVMEV_ASSERT(conv_ftls);
+
+#if defined(INFLASH_COMPUTE)
+	/*
+	 * In-flash-compute command shape (decouple sensing extent from host transfer).
+	 *
+	 * A real PIM "compute" command has the host submit a *tiny* request — here a
+	 * single 4 KB page — so the Linux O_DIRECT path pins/unpins exactly one page,
+	 * builds a 1-entry PRP list, and reaps one IRQ: its per-page bookkeeping cost
+	 * is O(1) instead of O(request pages). The device, however, interprets a
+	 * single-page read as a trigger to *sense* COMPUTE_SENSE_PAGES consecutive
+	 * LPNs (all-plane activation). NLB (cmd->rw.length) therefore governs only the
+	 * host-side DMA; the on-device sensing range is set here, device-side.
+	 *
+	 * The full COMPUTE_SENSE_PAGES range is still walked and charged tR + channel
+	 * time per LUN below, so nsecs_target and plane-level parallelism are identical
+	 * to a full COMPUTE_SENSE_PAGES-page read. Only the host wall-clock (O_DIRECT
+	 * page cost) collapses, which is the entire point. Multi-page host reads keep
+	 * their natural range (prior reqsize experiments unaffected).
+	 */
+	if (start_lpn == end_lpn && compute_sense_pages > 1) {
+		end_lpn = start_lpn + compute_sense_pages - 1;
+		nr_lba = (end_lpn - start_lpn + 1) * spp->secs_per_pg;
+	}
+	inflash_sense_pages = end_lpn - start_lpn + 1;
+#endif
+
 	NVMEV_DEBUG_VERBOSE("%s: start_lpn=%lld, len=%lld, end_lpn=%lld", __func__, start_lpn, nr_lba, end_lpn);
 	if ((end_lpn / nr_parts) >= spp->tt_pgs) {
 		NVMEV_ERROR("%s: lpn passed FTL range (start_lpn=%lld > tt_pgs=%ld)\n", __func__,
@@ -898,7 +936,11 @@ static bool conv_read(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 			}
 
 			if (xfer_size > 0) {
+#if defined(INFLASH_COMPUTE)
+				srd.xfer_size = COMPUTE_RESULT_SIZE;
+#else
 				srd.xfer_size = xfer_size;
+#endif
 				srd.ppa = &prev_ppa;
 				nsecs_completed = ssd_advance_nand(conv_ftl->ssd, &srd);
 				nsecs_latest = max(nsecs_completed, nsecs_latest);
@@ -910,7 +952,11 @@ static bool conv_read(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 
 		// issue remaining io
 		if (xfer_size > 0) {
+#if defined(INFLASH_COMPUTE)
+			srd.xfer_size = COMPUTE_RESULT_SIZE;
+#else
 			srd.xfer_size = xfer_size;
+#endif
 			srd.ppa = &prev_ppa;
 			nsecs_completed = ssd_advance_nand(conv_ftl->ssd, &srd);
 			nsecs_latest = max(nsecs_completed, nsecs_latest);
@@ -918,6 +964,27 @@ static bool conv_read(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 	}
 
 	ret->nsecs_target = nsecs_latest;
+
+#if defined(INFLASH_COMPUTE)
+	/*
+	 * INFLASH_PIM device-latency observer: emit (nsecs_target - nsecs_start) to dmesg
+	 * so the emergent per-round latency (tR + t_cmd) can be read off the model separately
+	 * from host wall-clock e2e.  Rate-limited to ≤1 message/s to avoid flooding the ring
+	 * buffer during request sweeps.
+	 *
+	 * Read-back procedure:
+	 *   dmesg | grep "inflash_dev_lat"
+	 *   Each line: "NVMeVirt: inflash_dev_lat <N> ns"  where N = nsecs_target - nsecs_start
+	 *   For a lone 4 KB request    → N ≈ 30000 ns  (≈ tR only, negligible t_cmd)
+	 *   For a saturated round (all 512 LUNs active) → N ≈ 32600 ns  (tR + emergent t_cmd)
+	 *   Half-channel load (256 LUNs) → N between the two above
+	 */
+	if (nsecs_latest > nsecs_start) {
+		printk_ratelimited(KERN_INFO "NVMeVirt: inflash_dev_lat %llu ns (sensed %llu pages)\n",
+				   nsecs_latest - nsecs_start, inflash_sense_pages);
+	}
+#endif
+
 	ret->status = NVME_SC_SUCCESS;
 	return true;
 }

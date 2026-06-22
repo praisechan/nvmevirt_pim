@@ -72,8 +72,25 @@ static unsigned int io_unit_shift = 12;
 
 static char *cpus;
 static unsigned int debug = 0;
+static unsigned int nr_dispatchers = 1;
 
 int io_using_dma = false;
+
+/*
+ * INFLASH compute sensing extent (runtime-selectable; shared with conv_read via extern).
+ *   compute_sense_pages = COMPUTE_SENSE_PAGES (default, 512) -> ALL-PLANE mode:
+ *       one single-page NVMe read triggers sensing of all 512 planes device-side.
+ *   compute_sense_pages = 1                                  -> SINGLE-PLANE mode:
+ *       one single-page NVMe read senses exactly one page/plane (no expansion);
+ *       activating all 512 planes then takes 512 separate NVMe requests.
+ * Default preserves the prior all-plane behaviour, so existing builds/experiments
+ * are unaffected. Toggle at insmod, e.g. `insmod nvmev.ko ... compute_sense_pages=1`.
+ */
+#if defined(INFLASH_COMPUTE)
+unsigned int compute_sense_pages = COMPUTE_SENSE_PAGES;
+#else
+unsigned int compute_sense_pages = 1;
+#endif
 
 static int set_parse_mem_param(const char *val, const struct kernel_param *kp)
 {
@@ -110,9 +127,28 @@ MODULE_PARM_DESC(io_unit_shift, "Size of each I/O unit (2^)");
 module_param(cpus, charp, 0444);
 MODULE_PARM_DESC(cpus, "CPU list for process, completion(int.) threads, Seperated by Comma(,)");
 module_param(debug, uint, 0644);
+module_param(nr_dispatchers, uint, 0644);
+MODULE_PARM_DESC(nr_dispatchers,
+	"Number of dispatcher (controller-core) threads. Each polls a disjoint subset of "
+	"submission queues ((sqid-1)%nr_dispatchers); admin queue + BARs stay on dispatcher 0. "
+	"The first nr_dispatchers CPUs in cpus= become dispatchers, the rest io_workers. Default 1.");
+module_param(compute_sense_pages, uint, 0644);
+MODULE_PARM_DESC(compute_sense_pages,
+	"INFLASH compute sensing extent: 512=all-plane (1 NVMe req senses all planes), 1=single-plane (1 req=1 plane)");
 
-// Returns true if an event is processed
-static bool nvmev_proc_dbs(void)
+/*
+ * Process the doorbells owned by dispatcher @disp_id of @nr_disp.
+ *
+ * Each io submission/completion queue qid (1-based) is owned by exactly one
+ * dispatcher: (qid - 1) % nr_disp. This partitions the doorbell scan across N
+ * dispatcher threads with no shared mutation of old_dbs[] / queue state, so N
+ * controller cores process disjoint queue subsets. The admin queue (dbs index
+ * 0/1) is processed by dispatcher 0 only, to avoid races on the admin queue and
+ * controller registers.
+ *
+ * Returns true if an event is processed.
+ */
+static bool nvmev_proc_dbs(unsigned int disp_id, unsigned int nr_disp)
 {
 	int qid;
 	int dbs_idx;
@@ -120,23 +156,27 @@ static bool nvmev_proc_dbs(void)
 	int old_db;
 	bool updated = false;
 
-	// Admin queue
-	new_db = nvmev_vdev->dbs[0];
-	if (new_db != nvmev_vdev->old_dbs[0]) {
-		nvmev_proc_admin_sq(new_db, nvmev_vdev->old_dbs[0]);
-		nvmev_vdev->old_dbs[0] = new_db;
-		updated = true;
-	}
-	new_db = nvmev_vdev->dbs[1];
-	if (new_db != nvmev_vdev->old_dbs[1]) {
-		nvmev_proc_admin_cq(new_db, nvmev_vdev->old_dbs[1]);
-		nvmev_vdev->old_dbs[1] = new_db;
-		updated = true;
+	// Admin queue — dispatcher 0 only
+	if (disp_id == 0) {
+		new_db = nvmev_vdev->dbs[0];
+		if (new_db != nvmev_vdev->old_dbs[0]) {
+			nvmev_proc_admin_sq(new_db, nvmev_vdev->old_dbs[0]);
+			nvmev_vdev->old_dbs[0] = new_db;
+			updated = true;
+		}
+		new_db = nvmev_vdev->dbs[1];
+		if (new_db != nvmev_vdev->old_dbs[1]) {
+			nvmev_proc_admin_cq(new_db, nvmev_vdev->old_dbs[1]);
+			nvmev_vdev->old_dbs[1] = new_db;
+			updated = true;
+		}
 	}
 
-	// Submission queues
+	// Submission queues owned by this dispatcher
 	for (qid = 1; qid <= nvmev_vdev->nr_sq; qid++) {
 		if (nvmev_vdev->sqes[qid] == NULL)
+			continue;
+		if (((qid - 1) % nr_disp) != disp_id)
 			continue;
 		dbs_idx = qid * 2;
 		new_db = nvmev_vdev->dbs[dbs_idx];
@@ -147,9 +187,11 @@ static bool nvmev_proc_dbs(void)
 		}
 	}
 
-	// Completion queues
+	// Completion queues owned by this dispatcher
 	for (qid = 1; qid <= nvmev_vdev->nr_cq; qid++) {
 		if (nvmev_vdev->cqes[qid] == NULL)
+			continue;
+		if (((qid - 1) % nr_disp) != disp_id)
 			continue;
 		dbs_idx = qid * 2 + 1;
 		new_db = nvmev_vdev->dbs[dbs_idx];
@@ -166,16 +208,19 @@ static bool nvmev_proc_dbs(void)
 
 static int nvmev_dispatcher(void *data)
 {
-	static unsigned long last_dispatched_time = 0;
+	struct nvmev_dispatcher *disp = (struct nvmev_dispatcher *)data;
+	unsigned int disp_id = disp->id;
+	unsigned int nr_disp = nvmev_vdev->config.nr_dispatchers;
+	unsigned long last_dispatched_time = jiffies;
 
-	NVMEV_INFO("nvmev_dispatcher started on cpu %d (node %d)\n",
-		   nvmev_vdev->config.cpu_nr_dispatcher,
-		   cpu_to_node(nvmev_vdev->config.cpu_nr_dispatcher));
+	NVMEV_INFO("%s (%u/%u) started on cpu %d (node %d)\n", disp->thread_name, disp_id, nr_disp,
+		   smp_processor_id(), cpu_to_node(smp_processor_id()));
 
 	while (!kthread_should_stop()) {
-		if (nvmev_proc_bars())
+		/* BAR/register processing is controller-wide: dispatcher 0 only */
+		if (disp_id == 0 && nvmev_proc_bars())
 			last_dispatched_time = jiffies;
-		if (nvmev_proc_dbs())
+		if (nvmev_proc_dbs(disp_id, nr_disp))
 			last_dispatched_time = jiffies;
 
 		if (CONFIG_NVMEVIRT_IDLE_TIMEOUT != 0 &&
@@ -190,18 +235,40 @@ static int nvmev_dispatcher(void *data)
 
 static void NVMEV_DISPATCHER_INIT(struct nvmev_dev *nvmev_vdev)
 {
-	nvmev_vdev->nvmev_dispatcher = kthread_create(nvmev_dispatcher, NULL, "nvmev_dispatcher");
-	if (nvmev_vdev->config.cpu_nr_dispatcher != -1)
-		kthread_bind(nvmev_vdev->nvmev_dispatcher, nvmev_vdev->config.cpu_nr_dispatcher);
-	wake_up_process(nvmev_vdev->nvmev_dispatcher);
+	unsigned int nr_disp = nvmev_vdev->config.nr_dispatchers;
+	unsigned int d;
+
+	nvmev_vdev->dispatchers =
+		kcalloc(nr_disp, sizeof(struct nvmev_dispatcher), GFP_KERNEL);
+
+	for (d = 0; d < nr_disp; d++) {
+		struct nvmev_dispatcher *disp = &nvmev_vdev->dispatchers[d];
+
+		disp->id = d;
+		snprintf(disp->thread_name, sizeof(disp->thread_name), "nvmev_dispatcher_%u", d);
+		disp->task_struct = kthread_create(nvmev_dispatcher, disp, "%s", disp->thread_name);
+		if (nvmev_vdev->config.cpu_nr_dispatchers[d] != -1)
+			kthread_bind(disp->task_struct, nvmev_vdev->config.cpu_nr_dispatchers[d]);
+		wake_up_process(disp->task_struct);
+	}
 }
 
 static void NVMEV_DISPATCHER_FINAL(struct nvmev_dev *nvmev_vdev)
 {
-	if (!IS_ERR_OR_NULL(nvmev_vdev->nvmev_dispatcher)) {
-		kthread_stop(nvmev_vdev->nvmev_dispatcher);
-		nvmev_vdev->nvmev_dispatcher = NULL;
+	unsigned int d;
+
+	if (!nvmev_vdev->dispatchers)
+		return;
+
+	for (d = 0; d < nvmev_vdev->config.nr_dispatchers; d++) {
+		struct nvmev_dispatcher *disp = &nvmev_vdev->dispatchers[d];
+
+		if (!IS_ERR_OR_NULL(disp->task_struct))
+			kthread_stop(disp->task_struct);
 	}
+
+	kfree(nvmev_vdev->dispatchers);
+	nvmev_vdev->dispatchers = NULL;
 }
 
 #ifdef CONFIG_X86
@@ -350,6 +417,9 @@ static int __proc_file_read(struct seq_file *m, void *data)
 		}
 		seq_printf(m, "total: %u %u %u %llu\n", nr_in_flight, nr_dispatch, nr_dispatched,
 			   total_io);
+	} else if (strcmp(filename, "chstat") == 0) {
+		/* ch->lock contention + per-(cpu,channel) affinity counters (§15) */
+		ssd_chstat_show(m);
 	} else if (strcmp(filename, "debug") == 0) {
 		/* Left for later use */
 	}
@@ -400,6 +470,9 @@ static ssize_t __proc_file_write(struct file *file, const char __user *buf, size
 
 			memset(&sq->stat, 0x00, sizeof(sq->stat));
 		}
+	} else if (!strcmp(filename, "chstat")) {
+		/* any write resets the §15 contention/affinity counters */
+		ssd_chstat_reset();
 	} else if (!strcmp(filename, "debug")) {
 		/* Left for later use */
 	}
@@ -458,6 +531,8 @@ static void NVMEV_STORAGE_INIT(struct nvmev_dev *nvmev_vdev)
 		proc_create("io_units", 0664, nvmev_vdev->proc_root, &proc_file_fops);
 	nvmev_vdev->proc_stat = proc_create("stat", 0444, nvmev_vdev->proc_root, &proc_file_fops);
 	nvmev_vdev->proc_debug = proc_create("debug", 0444, nvmev_vdev->proc_root, &proc_file_fops);
+	nvmev_vdev->proc_chstat =
+		proc_create("chstat", 0664, nvmev_vdev->proc_root, &proc_file_fops);
 }
 
 static void NVMEV_STORAGE_FINAL(struct nvmev_dev *nvmev_vdev)
@@ -467,6 +542,7 @@ static void NVMEV_STORAGE_FINAL(struct nvmev_dev *nvmev_vdev)
 	remove_proc_entry("io_units", nvmev_vdev->proc_root);
 	remove_proc_entry("stat", nvmev_vdev->proc_root);
 	remove_proc_entry("debug", nvmev_vdev->proc_root);
+	remove_proc_entry("chstat", nvmev_vdev->proc_root);
 
 	remove_proc_entry("nvmev", NULL);
 
@@ -479,11 +555,18 @@ static void NVMEV_STORAGE_FINAL(struct nvmev_dev *nvmev_vdev)
 
 static bool __load_configs(struct nvmev_config *config)
 {
-	bool first = true;
 	unsigned int cpu_nr;
+	unsigned int idx = 0;
 	char *cpu;
 
 	if (__validate_configs() < 0) {
+		return false;
+	}
+
+	if (nr_dispatchers < 1)
+		nr_dispatchers = 1;
+	if (nr_dispatchers > 32) {
+		NVMEV_ERROR("nr_dispatchers=%u exceeds max 32\n", nr_dispatchers);
 		return false;
 	}
 
@@ -507,17 +590,38 @@ static bool __load_configs(struct nvmev_config *config)
 	config->io_unit_shift = io_unit_shift;
 
 	config->nr_io_workers = 0;
+	config->nr_dispatchers = nr_dispatchers;
 	config->cpu_nr_dispatcher = -1;
 
+	/*
+	 * cpus= assignment: the first nr_dispatchers CPUs become dispatcher
+	 * (controller-core) threads, the remaining CPUs become io_workers.
+	 * At nr_dispatchers=1 this is exactly the legacy scheme
+	 * (first CPU -> dispatcher, rest -> io_workers).
+	 */
 	while ((cpu = strsep(&cpus, ",")) != NULL) {
 		cpu_nr = (unsigned int)simple_strtol(cpu, NULL, 10);
-		if (first) {
-			config->cpu_nr_dispatcher = cpu_nr;
+		if (idx < nr_dispatchers) {
+			config->cpu_nr_dispatchers[idx] = cpu_nr;
+			if (idx == 0)
+				config->cpu_nr_dispatcher = cpu_nr;
 		} else {
 			config->cpu_nr_io_workers[config->nr_io_workers] = cpu_nr;
 			config->nr_io_workers++;
 		}
-		first = false;
+		idx++;
+	}
+
+	if (idx < nr_dispatchers) {
+		NVMEV_ERROR("cpus= lists only %u CPU(s) but nr_dispatchers=%u\n", idx,
+			    nr_dispatchers);
+		return false;
+	}
+	if (config->nr_io_workers == 0) {
+		NVMEV_ERROR("cpus= must list more than nr_dispatchers=%u CPUs so that at least "
+			    "one io_worker remains (got %u CPUs)\n",
+			    nr_dispatchers, idx);
+		return false;
 	}
 
 	return true;

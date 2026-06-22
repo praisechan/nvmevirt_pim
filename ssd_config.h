@@ -9,6 +9,7 @@
 #define ZNS_PROTOTYPE 2
 #define KV_PROTOTYPE 3
 #define WD_ZN540 4
+#define INFLASH_PIM 5
 
 /* SSD Type */
 #define SSD_TYPE_NVM 0
@@ -236,6 +237,68 @@ static_assert((ZONE_SIZE % DIES_PER_ZONE) == 0);
 #define ZRWAFG_SIZE (0)
 #define ZRWA_SIZE (0)
 #define ZRWA_BUFFER_SIZE (0)
+
+#define LBA_BITS (9)
+#define LBA_SIZE (1 << LBA_BITS)
+
+#elif (BASE_SSD == INFLASH_PIM)
+/* InFLASH PIM profile — 16 ch × 32 LUN/ch × 1 plane/LUN = 512 independent LUNs.
+ * Each LUN receives exactly one 4 KB page per request (1 page == 1 LUN).
+ * Capacity with 16 GB memmap: BLKS_PER_PLN=4, PGS_PER_BLK=2048 →
+ *   pages/LUN = 4096, total = 512 × 4096 × 4 KB = 8 GiB (leaves 8 GiB headroom).
+ * Target round latency: tR(30 us) + t_cmd(8 us) = 38 us.
+ */
+#define NR_NAMESPACES 1
+#define NS_SSD_TYPE_0 SSD_TYPE_CONV
+#define NS_CAPACITY_0 (0)
+#define NS_SSD_TYPE_1 NS_SSD_TYPE_0
+#define NS_CAPACITY_1 (0)
+#define MDTS (6)
+#define CELL_MODE (CELL_MODE_SLC)          /* single read latency */
+
+#define INFLASH_COMPUTE 1
+#define COMPUTE_RESULT_SIZE (64)           /* tiny per-LUN channel transfer (bytes) */
+#define COMPUTE_SENSE_PAGES (512)          /* on-device sensing extent for a compute command
+                                            * (LPNs sensed per single-page compute read).
+                                            * 512 = all planes (16 ch x 32 LUN). Decoupled
+                                            * from the host transfer size — see conv_read(). */
+
+#define SSD_PARTITIONS (1)
+#define NAND_CHANNELS (16)
+#define LUNS_PER_NAND_CH (32)              /* 8 dies x 4 planes */
+#define PLNS_PER_LUN (1)
+#define FLASH_PAGE_SIZE KB(4)              /* 1 page == 1 request == 1 LUN */
+#define ONESHOT_PAGE_SIZE (FLASH_PAGE_SIZE * 1)
+#define BLKS_PER_PLN (4)                   /* capacity tuning: blk=8MB, pgs_per_blk=2048, pages/LUN=4096, total=8GiB */
+#define BLK_SIZE (0)                       /* BLKS_PER_PLN > 0, so BLK_SIZE unused */
+static_assert((ONESHOT_PAGE_SIZE % FLASH_PAGE_SIZE) == 0);
+
+#define MAX_CH_XFER_SIZE KB(4)
+#define WRITE_UNIT_SIZE (512)
+
+#define NAND_CHANNEL_BANDWIDTH (800ull)    /* MB/s */
+#define PCIE_BANDWIDTH (3360ull)           /* MB/s */
+
+/* tR = 30 us; both 4 KB and full-page latencies set identical */
+#define NAND_4KB_READ_LATENCY_LSB (30000)
+#define NAND_4KB_READ_LATENCY_MSB (30000)
+#define NAND_4KB_READ_LATENCY_CSB (30000)
+#define NAND_READ_LATENCY_LSB (30000)
+#define NAND_READ_LATENCY_MSB (30000)
+#define NAND_READ_LATENCY_CSB (30000)
+#define NAND_PROG_LATENCY (185000)         /* used only during prepopulation writes */
+#define NAND_ERASE_LATENCY (0)
+
+/* firmware overheads — start at 0 so model converges to 38 us; lead recalibrates */
+#define FW_4KB_READ_LATENCY (0)
+#define FW_READ_LATENCY (0)
+#define FW_WBUF_LATENCY0 (0)
+#define FW_WBUF_LATENCY1 (0)
+#define FW_CH_XFER_LATENCY (0)             /* calibration knob for 8 us/channel cmd cost */
+#define OP_AREA_PERCENT (0.07)
+
+#define GLOBAL_WB_SIZE (NAND_CHANNELS * LUNS_PER_NAND_CH * ONESHOT_PAGE_SIZE * 2)
+#define WRITE_EARLY_COMPLETION 1
 
 #define LBA_BITS (9)
 #define LBA_SIZE (1 << LBA_BITS)

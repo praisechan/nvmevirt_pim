@@ -61,6 +61,23 @@ static unsigned int __do_perform_io(int sqid, int sq_entry)
 
 	offset = __cmd_io_offset(cmd);
 	length = __cmd_io_size(cmd);
+
+#if defined(INFLASH_COMPUTE)
+	/*
+	 * In-flash compute: partial results are reduced/accumulated ON-DEVICE and
+	 * only a negligible final output is returned to the host — the page data is
+	 * never DMA'd out. So for READ commands we copy only COMPUTE_RESULT_SIZE
+	 * bytes regardless of the command's transfer length. The FTL (conv_read)
+	 * still issues a per-LUN NAND sensing for the full addressed range, so the
+	 * timing model (nsecs_target, plane-level parallelism) is unchanged; this
+	 * only removes the artificial full-page memcpy that the single io_worker
+	 * would otherwise perform serially and that inflates host-observed e2e.
+	 * Writes (incl. prepopulation) keep their full transfer.
+	 */
+	if (cmd->opcode == nvme_cmd_read && length > COMPUTE_RESULT_SIZE)
+		length = COMPUTE_RESULT_SIZE;
+#endif
+
 	remaining = length;
 
 	while (remaining) {
@@ -291,10 +308,15 @@ static void __insert_req_sorted(unsigned int entry, struct nvmev_io_worker *work
 	}
 }
 
-static struct nvmev_io_worker *__allocate_work_queue_entry(int sqid, unsigned int *entry)
+static inline struct nvmev_io_worker *__select_io_worker(int sqid)
 {
-	unsigned int io_worker_turn = __get_io_worker(sqid);
-	struct nvmev_io_worker *worker = &nvmev_vdev->io_workers[io_worker_turn];
+	return &nvmev_vdev->io_workers[__get_io_worker(sqid)];
+}
+
+/* Pop a free work-queue entry from @worker. Caller MUST hold worker->lock. */
+static struct nvmev_io_work *__alloc_entry_locked(struct nvmev_io_worker *worker,
+						  unsigned int *entry)
+{
 	unsigned int e = worker->free_seq;
 	struct nvmev_io_work *w = worker->work_queue + e;
 
@@ -303,30 +325,27 @@ static struct nvmev_io_worker *__allocate_work_queue_entry(int sqid, unsigned in
 		return NULL;
 	}
 
-	if (++io_worker_turn == nvmev_vdev->config.nr_io_workers)
-		io_worker_turn = 0;
-	nvmev_vdev->io_worker_turn = io_worker_turn;
-
 	worker->free_seq = w->next;
 	BUG_ON(worker->free_seq >= NR_MAX_PARALLEL_IO);
 	*entry = e;
 
-	return worker;
+	return w;
 }
 
 static void __enqueue_io_req(int sqid, int cqid, int sq_entry, unsigned long long nsecs_start,
 			     struct nvmev_result *ret)
 {
 	struct nvmev_submission_queue *sq = nvmev_vdev->sqes[sqid];
-	struct nvmev_io_worker *worker;
+	struct nvmev_io_worker *worker = __select_io_worker(sqid);
 	struct nvmev_io_work *w;
 	unsigned int entry;
 
-	worker = __allocate_work_queue_entry(sqid, &entry);
-	if (!worker)
+	spin_lock(&worker->lock);
+	w = __alloc_entry_locked(worker, &entry);
+	if (!w) {
+		spin_unlock(&worker->lock);
 		return;
-
-	w = worker->work_queue + entry;
+	}
 
 	NVMEV_DEBUG_VERBOSE("%s/%u[%d], sq %d cq %d, entry %d, %llu + %llu\n", worker->thread_name, entry,
 		    sq_entry(sq_entry).rw.opcode, sqid, cqid, sq_entry, nsecs_start,
@@ -352,20 +371,22 @@ static void __enqueue_io_req(int sqid, int cqid, int sq_entry, unsigned long lon
 	mb(); /* IO worker shall see the updated w at once */
 
 	__insert_req_sorted(entry, worker, ret->nsecs_target);
+	spin_unlock(&worker->lock);
 }
 
 void schedule_internal_operation(int sqid, unsigned long long nsecs_target,
 				 struct buffer *write_buffer, size_t buffs_to_release)
 {
-	struct nvmev_io_worker *worker;
+	struct nvmev_io_worker *worker = __select_io_worker(sqid);
 	struct nvmev_io_work *w;
 	unsigned int entry;
 
-	worker = __allocate_work_queue_entry(sqid, &entry);
-	if (!worker)
+	spin_lock(&worker->lock);
+	w = __alloc_entry_locked(worker, &entry);
+	if (!w) {
+		spin_unlock(&worker->lock);
 		return;
-
-	w = worker->work_queue + entry;
+	}
 
 	NVMEV_DEBUG_VERBOSE("%s/%u, internal sq %d, %llu + %llu\n", worker->thread_name, entry, sqid,
 		    local_clock(), nsecs_target - local_clock());
@@ -385,6 +406,7 @@ void schedule_internal_operation(int sqid, unsigned long long nsecs_target,
 	mb(); /* IO worker shall see the updated w at once */
 
 	__insert_req_sorted(entry, worker, nsecs_target);
+	spin_unlock(&worker->lock);
 }
 
 static void __reclaim_completed_reqs(void)
@@ -401,6 +423,10 @@ static void __reclaim_completed_reqs(void)
 		int nr_reclaimed = 0;
 
 		worker = &nvmev_vdev->io_workers[turn];
+
+		/* Serialize free-list/io_seq mutation against concurrent
+		 * dispatcher enqueues and other dispatchers' reclaims. */
+		spin_lock(&worker->lock);
 
 		first_entry = worker->io_seq;
 		curr = first_entry;
@@ -435,6 +461,8 @@ static void __reclaim_completed_reqs(void)
 			NVMEV_DEBUG_VERBOSE("%s: %u -- %u, %d\n", __func__,
 					first_entry, last_entry, nr_reclaimed);
 		}
+
+		spin_unlock(&worker->lock);
 	}
 }
 
@@ -620,11 +648,20 @@ static int nvmev_io_worker(void *data)
 
 		volatile unsigned int curr = worker->io_seq;
 		int qidx;
+		/* Defensive bound: the io_seq list can be at most NR_MAX_PARALLEL_IO
+		 * long. Capping the walk guarantees the thread always returns to
+		 * cond_resched()/kthread_should_stop() even if the list were ever
+		 * corrupted into a cycle, so the module stays removable (no soft
+		 * lockup / unkillable kthread). Normal walks are far shorter. */
+		unsigned int walked = 0;
 
 		while (curr != -1) {
 			struct nvmev_io_work *w = &worker->work_queue[curr];
 			unsigned long long curr_nsecs = local_clock() + delta;
 			worker->latest_nsecs = curr_nsecs;
+
+			if (++walked > NR_MAX_PARALLEL_IO)
+				break;
 
 			if (w->is_completed == true) {
 				curr = w->next;
@@ -755,6 +792,7 @@ void NVMEV_IO_WORKER_INIT(struct nvmev_dev *nvmev_vdev)
 			worker->work_queue[i].prev = i - 1;
 		}
 		worker->work_queue[NR_MAX_PARALLEL_IO - 1].next = -1;
+		spin_lock_init(&worker->lock);
 		worker->id = worker_id;
 		worker->free_seq = 0;
 		worker->free_seq_end = NR_MAX_PARALLEL_IO - 1;

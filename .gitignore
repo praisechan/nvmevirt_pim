@@ -171,3 +171,10 @@ sphinx_*/
 
 # Local makefile
 Makefile.local
+
+#
+# Project-local: compiled host benchmarks and tool state (not source)
+#
+host/inflash_bench
+host/inflash_bench_spdk
+.omc/

@@ -1,0 +1,5 @@
+mode,compute_sense_pages,planes_activated,nvme_cmds,qdepth,host_e2e_us_median,perop_p50_us,perop_p99_us,device_lat_ns,sensed_pages,host_stack,notes
+all_plane,512,512,1,1,34.82,34.77,34.77,34152,512,spdk,"1 cmd senses all planes; pays +4us emergent t_cmd"
+single_plane,1,1,1,1,30.79,30.74,30.74,30152,1,spdk,"1 cmd = 1 plane; pure tR, no t_cmd"
+single_plane,1,512,512,512,144.32,60.96,104.73,30152,1,spdk,"512 cmds activate 512 planes; host/dispatcher-bound"
+single_plane,1,512,512,64,283.46,32.30,37.70,30152,1,spdk,"qd64: 8 serialized batches"

@@ -1,0 +1,4 @@
+io_workers,cpus,dispatcher_cpu,e2e_512_1set_us,amort_us_per_512set,per_cmd_ns,mode,host_stack,notes
+1,"7,8",7,153.18,124.94,244.0,single_plane,spdk,"baseline (1 dispatcher + 1 io_worker)"
+3,"7,8,9,10",7,153.00,134.84,263.4,single_plane,spdk,"flat: io_worker parallelism is not the limiter"
+5,"7,8,9,10,11,12",7,159.65,136.57,266.7,single_plane,spdk,"flat/slightly worse: single dispatcher is the wall"

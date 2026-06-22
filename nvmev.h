@@ -153,7 +153,9 @@ struct nvmev_config {
 	unsigned long storage_start; //byte
 	unsigned long storage_size; // byte
 
-	unsigned int cpu_nr_dispatcher;
+	unsigned int cpu_nr_dispatcher; /* first dispatcher CPU; wallclock reference */
+	unsigned int nr_dispatchers; /* number of dispatcher (controller-core) threads */
+	unsigned int cpu_nr_dispatchers[32];
 	unsigned int nr_io_workers;
 	unsigned int cpu_nr_io_workers[32];
 
@@ -211,6 +213,29 @@ struct nvmev_io_worker {
 	unsigned int id;
 	struct task_struct *task_struct;
 	char thread_name[32];
+
+	/*
+	 * Serializes mutation of this worker's work_queue free-list and sorted
+	 * io_seq list. With nr_dispatchers > 1 several dispatcher threads may
+	 * enqueue to (and reclaim from) the SAME io_worker concurrently whenever
+	 * (sqid-1)%nr_io_workers collides across dispatcher-owned SQs; the original
+	 * single-dispatcher design relied on a single writer per worker. The
+	 * io_worker thread itself only flips per-entry flags (is_copied/is_completed)
+	 * and does not take this lock. Uncontended at nr_dispatchers=1.
+	 */
+	spinlock_t lock;
+};
+
+/*
+ * A dispatcher models one controller core. With nr_dispatchers > 1, several
+ * dispatcher kthreads each poll a disjoint subset of submission/completion
+ * queue doorbells (queue qid is owned by dispatcher (qid-1) % nr_dispatchers).
+ * Admin queue and BAR/register processing stay on dispatcher 0.
+ */
+struct nvmev_dispatcher {
+	unsigned int id; /* dispatcher index in [0, nr_dispatchers) */
+	struct task_struct *task_struct;
+	char thread_name[32];
 };
 
 struct nvmev_dev {
@@ -225,7 +250,7 @@ struct nvmev_dev {
 	struct pci_dev *pdev;
 
 	struct nvmev_config config;
-	struct task_struct *nvmev_dispatcher;
+	struct nvmev_dispatcher *dispatchers;
 
 	void *storage_mapped;
 
@@ -259,6 +284,7 @@ struct nvmev_dev {
 	struct proc_dir_entry *proc_io_units;
 	struct proc_dir_entry *proc_stat;
 	struct proc_dir_entry *proc_debug;
+	struct proc_dir_entry *proc_chstat;
 
 	unsigned long long *io_unit_stat;
 };

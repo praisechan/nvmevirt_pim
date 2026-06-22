@@ -1,0 +1,10 @@
+phase,nr_dispatchers,cpus,io_workers,host_threads,routing,requests,qdepth,e2e_med_us,amort_us_per_512set,per_cmd_ns,contended,acquired,max_cpus_per_ch,dev_lat
+CA2,4,0;1;2;3;4;5,2,4,spread,4096,512,1831.19,228.9,447.1,660,40960,4,30152 ns (sensed 1 pages)
+CA2,4,0;1;2;3;4;5,2,4,affine,4096,512,1841.17,230.15,449.5,0,40960,1,30152 ns (sensed 1 pages)
+CA2,8,0;1;2;3;4;5;6;7;8;9,2,8,spread,4096,512,2341.14,292.64,571.6,584,40960,8,30152 ns (sensed 1 pages)
+CA2,8,0;1;2;3;4;5;6;7;8;9,2,8,affine,4096,512,2155.19,269.4,526.2,0,40960,1,30152 ns (sensed 1 pages)
+CA2,16,0;1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;0;1,2,16,spread,4096,512,47292.83,5911.6,11546.1,586,40960,16,30152 ns (sensed 1 pages)
+CA2,16,0;1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;0;1,2,16,affine,4096,512,49209.86,6151.23,12014.1,0,40960,1,30152 ns (sensed 1 pages)
+CA4,4,0;1;2;3;4;5,2,1,allplane,1,1,34.94,,,,,,34152 ns (sensed 512 pages)
+CA4,8,0;1;2;3;4;5;6;7;8;9,2,1,allplane,1,1,35.04,,,,,,34152 ns (sensed 512 pages)
+CA4,16,0;1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;0;1,2,1,allplane,1,1,5982.41,,,,,,34152 ns (sensed 512 pages)

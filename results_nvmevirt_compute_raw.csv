@@ -1,0 +1,6 @@
+layout,shape,host_pages,planes_sensed,requests,qdepth,host_e2e_us_median,device_lat_ns,notes
+256KB_1cmd,OLD_multipage,64,64,1,1,74,30152,"E1 baseline: one 256 KB command, 64 LUNs (4/ch); warmup trial0=120us excluded"
+1page_compute,NEW_compute,1,512,1,1,48,34152,"E2: one 1-page --compute command, ALL 512 planes sensed; host pins 1 page"
+1page_compute_8seq,NEW_compute,1,512,8,1,337,34152,"E3a: 8 compute commands qdepth1 (sequential); per-op p50~42us, e2e=8x"
+1page_compute_8pipe,NEW_compute,1,512,8,8,52,34152,"E3b: 8 compute commands qdepth8 (pipelined); device round shared, e2e flat ~52us"
+2MB_1cmd_PRIOR,OLD_multipage,512,512,1,1,538,30152,"prior report Exp 4.B (MDTS=9); all 512 planes via 2MB host read; reference"

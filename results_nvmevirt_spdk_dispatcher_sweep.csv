@@ -1,0 +1,20 @@
+phase,nr_dispatchers,cpus,io_workers,host_threads,mode,requests,qdepth,e2e_med_us,amort_us_per_512set,per_cmd_ns,dev_lat
+D1,1,7;8,1,1,single-plane,1,1,30.8,,,30152 ns (sensed 1 pages)
+D1,1,7;8,1,1,single-plane,4096,512,1214.95,151.87,296.6,
+D2,2,7;8;9;10,2,1,single-plane,1,1,30.83,,,30152 ns (sensed 1 pages)
+D2,2,7;8;9;10,2,1,single-plane,4096,512,1479.44,184.93,361.2,
+D2,2,7;8;9;10,2,2,single-plane,4096,512,1583.70,197.96,386.6,
+D2,4,7;8;9;10;11;12,2,1,single-plane,1,1,30.88,,,30152 ns (sensed 1 pages)
+D2,4,7;8;9;10;11;12,2,1,single-plane,4096,512,1575.92,196.99,384.7,
+D2,4,7;8;9;10;11;12,2,4,single-plane,4096,512,1944.28,243.03,474.7,
+D2,8,1;2;3;4;5;6;7;8;9;10,2,1,single-plane,1,1,30.92,,,30152 ns (sensed 1 pages)
+D2,8,1;2;3;4;5;6;7;8;9;10,2,1,single-plane,4096,512,2073.25,259.16,506.2,
+D2,8,1;2;3;4;5;6;7;8;9;10,2,8,single-plane,4096,512,2466.37,308.30,602.1,
+D3,8,1;2;3;4;5;6;7;8;9;10,2,2,single-plane,4096,512,2322.71,290.34,567.1,
+D3,8,1;2;3;4;5;6;7;8;9;10,2,4,single-plane,4096,512,2298.47,287.31,561.1,
+D4,1,7;8,1,1,all-plane,1,1,34.82,,,34152 ns (sensed 512 pages)
+D4,2,7;8;9;10,2,1,all-plane,1,1,34.87,,,34152 ns (sensed 512 pages)
+D4,4,7;8;9;10;11;12,2,1,all-plane,1,1,34.84,,,34152 ns (sensed 512 pages)
+D4,8,1;2;3;4;5;6;7;8;9;10,2,1,all-plane,1,1,34.92,,,34152 ns (sensed 512 pages)
+CTL,1,1;9,1,1,single-plane,4096,512,1210.18,151.27,295.6,placement-control disp=cpu1 iow=cpu9 (matches N=8 working cores; isolates idle-dispatcher cost)
+CTL,1,1;2,1,1,single-plane,4096,512,1336.48,167.06,326.3,placement-control disp=cpu1 iow=cpu2

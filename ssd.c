@@ -2,9 +2,80 @@
 
 #include <linux/ktime.h>
 #include <linux/sched/clock.h>
+#include <linux/seq_file.h>
 
 #include "nvmev.h"
 #include "ssd.h"
+
+/*
+ * ------------------------------------------------------------------------
+ * Channel-lock contention / affinity instrumentation (report §15, Task CB/CC)
+ * ------------------------------------------------------------------------
+ * The running kernel (6.8.0-124) is built WITHOUT CONFIG_LOCK_STAT, so we
+ * cannot use /proc/lock_stat. Instead we count, directly in ssd_advance_nand:
+ *
+ *   - CHSTAT_contended[ch] : acquisitions of ch->lock that found it already
+ *     held (a real cross-dispatcher collision). Counted via spin_trylock so
+ *     the uncontended fast path is ~free; on failure we fall back to the
+ *     blocking spin_lock (identical timing semantics to the original code).
+ *   - CHSTAT_acquired[ch]  : total acquisitions of ch->lock.
+ *   - CHSTAT_hits[cpu][ch] : per-(calling CPU, channel) access count.
+ *     ssd_advance_nand runs in DISPATCHER context (nvmev_proc_io_sq ->
+ *     __nvmev_proc_io -> conv_read -> ssd_advance_nand), and each dispatcher
+ *     kthread is bound to a distinct CPU, so the CPU row identifies the
+ *     dispatcher. Under --chan-affine each channel column must have exactly
+ *     one non-zero CPU row (single owning dispatcher); under spread routing
+ *     every active dispatcher row is non-zero. This proves affinity holds.
+ *
+ * Headline evidence (§15): spread CHSTAT_contended > 0 and grows with N;
+ * channel-affine CHSTAT_contended ~ 0.
+ */
+#define CHSTAT_MAX_CH  64
+#define CHSTAT_MAX_CPU 64
+
+static atomic64_t chstat_contended[CHSTAT_MAX_CH];
+static atomic64_t chstat_acquired[CHSTAT_MAX_CH];
+static atomic64_t chstat_hits[CHSTAT_MAX_CPU][CHSTAT_MAX_CH];
+
+void ssd_chstat_reset(void)
+{
+	int i, j;
+	for (i = 0; i < CHSTAT_MAX_CH; i++) {
+		atomic64_set(&chstat_contended[i], 0);
+		atomic64_set(&chstat_acquired[i], 0);
+	}
+	for (i = 0; i < CHSTAT_MAX_CPU; i++)
+		for (j = 0; j < CHSTAT_MAX_CH; j++)
+			atomic64_set(&chstat_hits[i][j], 0);
+}
+
+void ssd_chstat_show(struct seq_file *m)
+{
+	int cpu, ch;
+	long long tot_acq = 0, tot_con = 0;
+
+	for (ch = 0; ch < CHSTAT_MAX_CH; ch++) {
+		tot_acq += atomic64_read(&chstat_acquired[ch]);
+		tot_con += atomic64_read(&chstat_contended[ch]);
+	}
+	seq_printf(m, "# ch->lock contention (trylock-fail = cross-dispatcher collision)\n");
+	seq_printf(m, "total_acquired %lld total_contended %lld\n", tot_acq, tot_con);
+	seq_printf(m, "# per-channel: ch acquired contended\n");
+	for (ch = 0; ch < CHSTAT_MAX_CH; ch++) {
+		long long a = atomic64_read(&chstat_acquired[ch]);
+		long long c = atomic64_read(&chstat_contended[ch]);
+		if (a || c)
+			seq_printf(m, "ch %d %lld %lld\n", ch, a, c);
+	}
+	seq_printf(m, "# per-(cpu,channel) hits: cpu ch hits  (affinity: one cpu row per ch under --chan-affine)\n");
+	for (cpu = 0; cpu < CHSTAT_MAX_CPU; cpu++) {
+		for (ch = 0; ch < CHSTAT_MAX_CH; ch++) {
+			long long h = atomic64_read(&chstat_hits[cpu][ch]);
+			if (h)
+				seq_printf(m, "cpu %d ch %d %lld\n", cpu, ch, h);
+		}
+	}
+}
 
 static inline uint64_t __get_ioclock(struct ssd *ssd)
 {
@@ -262,6 +333,8 @@ static void ssd_init_ch(struct ssd_channel *ch, struct ssdparams *spp)
 		ssd_init_nand_lun(&ch->lun[i], spp);
 	}
 
+	spin_lock_init(&ch->lock);
+
 	ch->perf_model = kmalloc(sizeof(struct channel_model), GFP_KERNEL);
 	chmodel_init(ch->perf_model, spp->ch_bandwidth);
 
@@ -386,6 +459,36 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 	cell = get_cell(ssd, ppa);
 	remaining = ncmd->xfer_size;
 
+	/*
+	 * Serialize the read-modify-write of this channel's timing state
+	 * (perf_model) and the addressed LUN's avail-time. With nr_dispatchers > 1
+	 * this is the contention point that models N controller cores sharing one
+	 * physical channel/die array: independent channels hold independent locks
+	 * and run in parallel, while commands on the same channel serialize.
+	 *
+	 * Instrumentation (report §15, Task CB/CC): use spin_trylock so the
+	 * uncontended fast path is ~free; a failed trylock is a genuine
+	 * cross-dispatcher collision on this channel and is counted, then we fall
+	 * back to the blocking spin_lock (identical semantics to a plain
+	 * spin_lock). Also tally per-(CPU,channel) hits — ssd_advance_nand runs in
+	 * dispatcher context, so the CPU identifies the owning dispatcher.
+	 */
+	{
+		int chs_ch = ppa->g.ch;
+		int chs_cpu = smp_processor_id();
+		if (chs_ch >= 0 && chs_ch < CHSTAT_MAX_CH) {
+			atomic64_inc(&chstat_acquired[chs_ch]);
+			if (!spin_trylock(&ch->lock)) {
+				atomic64_inc(&chstat_contended[chs_ch]);
+				spin_lock(&ch->lock);
+			}
+			if (chs_cpu >= 0 && chs_cpu < CHSTAT_MAX_CPU)
+				atomic64_inc(&chstat_hits[chs_cpu][chs_ch]);
+		} else {
+			spin_lock(&ch->lock);
+		}
+	}
+
 	switch (c) {
 	case NAND_READ:
 		/* read: perform NAND cmd first */
@@ -447,8 +550,11 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 
 	default:
 		NVMEV_ERROR("Unsupported NAND command: 0x%x\n", c);
+		spin_unlock(&ch->lock);
 		return 0;
 	}
+
+	spin_unlock(&ch->lock);
 
 	return completed_time;
 }

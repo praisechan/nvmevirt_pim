@@ -116,6 +116,16 @@ struct ssd_channel {
 	int nluns;
 	uint64_t gc_endtime;
 	struct channel_model *perf_model;
+	/*
+	 * Serializes the shared per-channel timing state (perf_model) and the
+	 * avail-time of the LUNs on this channel. With nr_dispatchers > 1, several
+	 * controller-core threads call ssd_advance_nand concurrently; they share
+	 * the one physical channel/die array and must contend on it exactly as real
+	 * controller cores do. Per-channel granularity keeps independent channels
+	 * parallel while serializing commands on the same channel. Uncontended (and
+	 * thus near-free) at nr_dispatchers=1.
+	 */
+	spinlock_t lock;
 };
 
 struct ssd_pcie {
@@ -268,4 +278,9 @@ bool buffer_release(struct buffer *buf, size_t size);
 void buffer_refill(struct buffer *buf);
 
 void adjust_ftl_latency(int target, int lat);
+
+/* Channel-lock contention / affinity counters (report §15, Task CB/CC) */
+struct seq_file;
+void ssd_chstat_reset(void);
+void ssd_chstat_show(struct seq_file *m);
 #endif

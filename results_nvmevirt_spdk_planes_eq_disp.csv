@@ -1,0 +1,11 @@
+phase,nr_dispatchers,cpus,io_workers,host_threads,routing,planes,qdepth,e2e_med_us,per_plane_ns,batch_depth,dev_lat
+B1,1,0;1,1,1,affine,1,1,30.82,30820.0,1,30152 ns (sensed 1 pages)
+B1,2,0;1;2,1,2,affine,2,2,77.28,38640.0,1,30152 ns (sensed 1 pages)
+B1,4,0;1;2;3;4;5,2,4,affine,4,4,86.4,21600.0,1,30152 ns (sensed 1 pages)
+B1,8,0;1;2;3;4;5;6;7;8;9,2,8,affine,8,8,126.52,15815.0,1,30152 ns (sensed 1 pages)
+B1,16,0;1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;0;1,2,16,affine,16,16,5494.78,343423.8,1,30152 ns (sensed 1 pages)
+B2,1,0;1,1,1,serial,1,1,30.8,30800.0,1,30152 ns (sensed 1 pages)
+B2,1,0;1,1,1,serial,2,2,31.19,15595.0,2,30152 ns (sensed 1 pages)
+B2,1,0;1,1,1,serial,4,4,31.76,7940.0,4,30152 ns (sensed 1 pages)
+B2,1,0;1,1,1,serial,8,8,32.95,4118.8,8,30152 ns (sensed 1 pages)
+B2,1,0;1,1,1,serial,16,16,34.97,2185.6,16,30152 ns (sensed 1 pages)

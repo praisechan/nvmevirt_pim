@@ -1,0 +1,5 @@
+note,reqsize_bytes,pages,luns_per_ch,host_e2e_ns,device_lat_ns
+ifc_copy_cap,4096,1,1,79000,30152
+ifc_copy_cap,262144,64,4,165000,30152
+ifc_copy_cap,1048576,256,16,411000,30152
+ifc_copy_cap,2097152,512,32,638000,30152

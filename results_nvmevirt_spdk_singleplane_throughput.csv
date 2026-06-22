@@ -1,0 +1,7 @@
+mode,compute_sense_pages,nvme_cmds,sets_of_512,qdepth,e2e_med_us,amort_us_per_512set,per_cmd_ns,host_stack,notes
+single_plane,1,512,1,512,188.60,188.60,368.4,spdk,"1 set: pipeline fill + warmup overhead"
+single_plane,1,1024,2,512,340.79,170.40,332.8,spdk,
+single_plane,1,2048,4,512,595.19,148.80,290.6,spdk,
+single_plane,1,4096,8,512,1115.46,139.43,272.3,spdk,
+single_plane,1,8192,16,512,2222.92,138.93,271.4,spdk,"asymptote: throughput-bound ~139us/512set, ~271ns/cmd"
+all_plane,512,1,1,1,34.82,34.82,34820.0,spdk,"reference: 512 planes in ONE command"

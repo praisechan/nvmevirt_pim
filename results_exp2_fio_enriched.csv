@@ -1,0 +1,9 @@
+harness,num_service_units,N_or_iodepth,qdepth,threads,T_model_ns,measured_e2e_ns,measured_MIOPS,abs_err,rel_err
+swarmio_fio,8,32,4,8,38000,46030,0.6620,8030,0.211316
+swarmio_fio,8,64,4,16,38000,48000,1.2640,10000,0.263158
+swarmio_fio,8,96,4,24,38000,0,1.7950,0,0.000000
+swarmio_fio,8,128,4,32,38000,0,2.2590,0,0.000000
+swarmio_fio,4,32,4,8,38000,42670,0.7310,4670,0.122895
+swarmio_fio,4,64,4,16,38000,45090,1.3660,7090,0.186579
+swarmio_fio,4,96,4,24,38000,47360,1.9370,9360,0.246316
+swarmio_fio,4,128,4,32,38000,0,2.4450,0,0.000000

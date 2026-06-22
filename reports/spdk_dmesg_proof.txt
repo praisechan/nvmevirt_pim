@@ -1,0 +1,8 @@
+[1613879.042755] NVMeVirt: inflash_dev_lat 34152 ns (sensed 512 pages)
+[1613879.042769] NVMeVirt: inflash_dev_lat 43166 ns (sensed 512 pages)
+[1613879.042781] NVMeVirt: inflash_dev_lat 61171 ns (sensed 512 pages)
+[1613879.042792] NVMeVirt: inflash_dev_lat 79843 ns (sensed 512 pages)
+[1613879.042803] NVMeVirt: inflash_dev_lat 98890 ns (sensed 512 pages)
+[1613879.042815] NVMeVirt: inflash_dev_lat 117577 ns (sensed 512 pages)
+[1613879.042824] NVMeVirt: inflash_dev_lat 136706 ns (sensed 512 pages)
+[1613879.042833] NVMeVirt: inflash_dev_lat 157441 ns (sensed 512 pages)

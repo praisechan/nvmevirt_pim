@@ -1,0 +1,36 @@
+# ch->lock contention (trylock-fail = cross-dispatcher collision)
+total_acquired 40960 total_contended 0
+# per-channel: ch acquired contended
+ch 0 2560 0
+ch 1 2560 0
+ch 2 2560 0
+ch 3 2560 0
+ch 4 2560 0
+ch 5 2560 0
+ch 6 2560 0
+ch 7 2560 0
+ch 8 2560 0
+ch 9 2560 0
+ch 10 2560 0
+ch 11 2560 0
+ch 12 2560 0
+ch 13 2560 0
+ch 14 2560 0
+ch 15 2560 0
+# per-(cpu,channel) hits: cpu ch hits  (affinity: one cpu row per ch under --chan-affine)
+cpu 0 ch 7 2560
+cpu 0 ch 15 2560
+cpu 1 ch 0 2560
+cpu 1 ch 8 2560
+cpu 2 ch 1 2560
+cpu 2 ch 9 2560
+cpu 3 ch 2 2560
+cpu 3 ch 10 2560
+cpu 4 ch 3 2560
+cpu 4 ch 11 2560
+cpu 5 ch 4 2560
+cpu 5 ch 12 2560
+cpu 6 ch 5 2560
+cpu 6 ch 13 2560
+cpu 7 ch 6 2560
+cpu 7 ch 14 2560

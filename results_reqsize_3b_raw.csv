@@ -1,0 +1,7 @@
+harness,num_service_units,N_or_iodepth,qdepth,threads,T_model_ns,measured_e2e_ns,measured_MIOPS,abs_err,rel_err,reqsize_bytes,num_requests
+swarmio,8,32,1,1,0,72544,0.4411,0,0.0,131072,1
+swarmio,8,64,1,1,0,94622,0.6764,0,0.0,262144,1
+swarmio,8,128,1,1,0,138522,0.9240,0,0.0,524288,1
+swarmio,8,256,1,1,0,256279,0.9989,0,0.0,1048576,1
+swarmio,8,512,1,1,0,478778,1.0694,0,0.0,2097152,1
+swarmio,8,1024,2,1,0,811417,1.2620,0,0.0,2097152,2
