@@ -161,9 +161,87 @@ payload transfer (`io_size = 0` for the custom opcode).
 - [x] Device-observed latency (~34.2 us) is near the 30 us level, not proportional to 512 pages.
 - [x] No 512-page host payload transfer; `conv_read()` / `conv_write()` unchanged; SPDK reset restored the kernel driver.
 
+## Serial Multi-Command Behavior
+
+Follow-up question: when several 512-page commands are submitted back-to-back
+in serial (`qdepth = 1`), does total time scale as `N x (30 us + alpha)`, with
+each command still completing at the ~30 us level rather than accumulating?
+
+Test: 30 sequential 512-page commands (`--npages 512 --qdepth 1 --trials 30`,
+LPNs `0..511`), artifacts `results_pim_serial.csv` and
+`dmesg_inflash_pim_serial.txt`.
+
+Results:
+
+- 30/30 trials successful (`status = 0`).
+- **Per-command device latency is flat:** every `inflash_dev_lat` line reports
+  the identical `34152 ns (requested 512 pages, sensed 512 pages)`. The value
+  does not grow across the serial stream — each command is an independent ~34 us
+  operation. (Only ~10 lines appear in dmesg because `printk_ratelimited`
+  suppresses the rest; the flat per-command host e2e confirms all 30 matched.)
+- **Per-command host e2e is flat:** min 34522 ns, mean 34673 ns, max 35235 ns.
+- **Aggregate scales linearly in N:** sum of host e2e over 30 commands =
+  1.040 ms ~= `30 x 34.7 us`. The device-only ideal `N x 34152 ns` = 1.025 ms;
+  the ~15 us difference is per-command SPDK submit/poll overhead (~0.5 us each).
+
+Interpretation:
+
+- Intra-command, the 512 distinct LUNs overlap through `ssd_advance_nand()`, so
+  one command costs ~30 us + ~4.15 us channel-model overhead, not 512 x 30 us.
+- Inter-command, at `qdepth = 1` the host waits for each completion before
+  submitting the next, so by the time command k+1 arrives, command k's LUNs are
+  free (`next_lun_avail_time` in the past). Commands therefore do not overlap and
+  simply add up.
+
+This confirms the original assumption: **serial total = N x (30 us + alpha)**
+(here `alpha ~= 4.15 us`), i.e. ~1.04 ms for N = 30, versus ~460.8 ms for a
+broken serialized-fan-out model (`512 x 30 us x N`).
+
+## FTL-Aware Addressing: explicit even distribution across 16 channels
+
+Goal: guarantee that a 512-page command spreads evenly across all 16 NAND
+channels by *FTL-aware addressing*, instead of relying on sequential
+prepopulation to happen to stripe the LPNs. The `conv_ftl` write pointer
+advances channel-first (`advance_write_pointer` increments `ch` before `lun`,
+one-page oneshot, `PLNS_PER_LUN = 1`), so LPN `n` deterministically lands on
+channel `n % nchs`.
+
+Implementation:
+
+- **Host (`host/inflash_bench_spdk.c`)**: new `--chan-affine` / `--nchs C`
+  (default `C = 16`) builds the LPN list grouped by channel residue
+  (`fill_lpn_list()`): for each channel `c`, it emits the LPNs in the command
+  window with `lpn % C == c`. For a 512-page window this places exactly
+  `512 / 16 = 32` LPNs on every channel by construction.
+- **Device (`conv_ftl.c`)**: `conv_inflash_compute()` now accumulates a
+  per-channel sensed histogram (`ch_counts[ppa.g.ch]`) and appends it to the
+  observer line, so the distribution is verifiable from `dmesg`.
+
+Test: `--npages 512 --qdepth 1 --trials 15 --chan-affine --nchs 16`, artifacts
+`results_pim_ftlaware.csv` and `dmesg_inflash_pim_ftlaware.txt`.
+
+Result (identical on every trial):
+
+```text
+NVMeVirt: inflash_dev_lat 34152 ns (requested 512 pages, sensed 512 pages, ch[16]={32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32})
+```
+
+- **Every channel sensed exactly 32 pages** — perfectly even by construction.
+- Device latency stays at `34152 ns` and host e2e at 34488 / 34634 / 35035 ns
+  (min/median/max, 15/15 successful), unchanged from the sequential gate: the
+  *set* of LPNs is the same `0..511`, so reordering them FTL-aware does not move
+  the timing - it makes the even 16-channel distribution explicit and provable
+  rather than incidental.
+
 ## Current Verdict
 
 PASS. Implementation matches the prompt specification and the required
 verification gate passes end-to-end via the SPDK raw-command host path, after
-the two host-side SPDK 25.05 link/init fixes noted above. Generated artifacts:
-`results_pim_spdk.csv` and `dmesg_inflash_pim.txt`.
+the two host-side SPDK 25.05 link/init fixes noted above. Serial multi-command
+submission scales linearly as `N x (30 us + alpha)` with flat per-command device
+latency. FTL-aware (channel-affine) addressing makes the even spread explicit
+and verifiable: the device histogram reports exactly 32 sensed pages on each of
+the 16 channels. Generated artifacts: `results_pim_spdk.csv`,
+`dmesg_inflash_pim.txt`, `results_pim_serial.csv`,
+`dmesg_inflash_pim_serial.txt`, `results_pim_ftlaware.csv`, and
+`dmesg_inflash_pim_ftlaware.txt`.

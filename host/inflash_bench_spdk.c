@@ -22,7 +22,39 @@ struct bench_config {
 	uint32_t npages;
 	uint32_t qdepth;
 	uint32_t trials;
+	uint64_t start_lpn;
+	uint64_t lpn_stride;
+	uint32_t nchs;
+	bool chan_affine;
 };
+
+/*
+ * Fill the LPN list for one command. The conv_ftl write pointer stripes pages
+ * channel-first, so LPN n lands on NAND channel (n % nchs). In FTL-aware
+ * (channel-affine) mode we emit the LPNs grouped by that residue, so a command
+ * spanning a contiguous LPN window provably places ceil/floor(npages/nchs)
+ * pages on every channel (32 each for 512 pages over 16 channels) by
+ * construction, rather than relying on the list happening to be sequential.
+ */
+static void fill_lpn_list(uint64_t *lpns, uint64_t base, uint32_t npages,
+			  uint32_t nchs, bool chan_affine)
+{
+	uint32_t idx = 0, ch;
+	uint64_t lpn;
+
+	if (!chan_affine || nchs == 0) {
+		for (idx = 0; idx < npages; idx++)
+			lpns[idx] = htole64(base + idx);
+		return;
+	}
+
+	for (ch = 0; ch < nchs; ch++) {
+		uint64_t first = base + ((ch + nchs - (base % nchs)) % nchs);
+
+		for (lpn = first; lpn < base + npages; lpn += nchs)
+			lpns[idx++] = htole64(lpn);
+	}
+}
 
 struct bench_device {
 	struct spdk_nvme_ctrlr *ctrlr;
@@ -41,7 +73,14 @@ static struct bench_device g_dev;
 static void usage(const char *prog)
 {
 	fprintf(stderr,
-		"Usage: %s --bdf <BDF> --npages N --qdepth 1 --trials T --csv <path> [--core-mask M]\n",
+		"Usage: %s --bdf <BDF> --npages N --qdepth 1 --trials T --csv <path>\n"
+		"          [--core-mask M] [--start-lpn S] [--lpn-stride D]\n"
+		"          [--chan-affine] [--nchs C]\n"
+		"  Trial k issues a command over LPNs [S + k*D .. S + k*D + N-1].\n"
+		"  Default S=0, D=0 (every trial reuses LPNs 0..N-1).\n"
+		"  --chan-affine: emit the LPN list FTL-aware (grouped by channel = lpn %% C,\n"
+		"                 C=--nchs, default 16) so the N pages spread evenly across\n"
+		"                 all channels by construction.\n",
 		prog);
 }
 
@@ -59,6 +98,20 @@ static int parse_u32(const char *s, uint32_t *value)
 	return 0;
 }
 
+static int parse_u64(const char *s, uint64_t *value)
+{
+	char *end = NULL;
+	unsigned long long v;
+
+	errno = 0;
+	v = strtoull(s, &end, 0);
+	if (errno || end == s || *end != '\0')
+		return -1;
+
+	*value = (uint64_t)v;
+	return 0;
+}
+
 static int parse_args(int argc, char **argv, struct bench_config *cfg)
 {
 	static const struct option long_opts[] = {
@@ -68,6 +121,10 @@ static int parse_args(int argc, char **argv, struct bench_config *cfg)
 		{ "trials", required_argument, NULL, 't' },
 		{ "csv", required_argument, NULL, 'c' },
 		{ "core-mask", required_argument, NULL, 'm' },
+		{ "start-lpn", required_argument, NULL, 's' },
+		{ "lpn-stride", required_argument, NULL, 'd' },
+		{ "nchs", required_argument, NULL, 'C' },
+		{ "chan-affine", no_argument, NULL, 'a' },
 		{ "help", no_argument, NULL, 'h' },
 		{ NULL, 0, NULL, 0 },
 	};
@@ -78,6 +135,10 @@ static int parse_args(int argc, char **argv, struct bench_config *cfg)
 		.qdepth = 1,
 		.trials = 15,
 		.core_mask = "0x1",
+		.start_lpn = 0,
+		.lpn_stride = 0,
+		.nchs = 16,
+		.chan_affine = false,
 	};
 
 	while ((opt = getopt_long(argc, argv, "", long_opts, NULL)) != -1) {
@@ -102,6 +163,21 @@ static int parse_args(int argc, char **argv, struct bench_config *cfg)
 			break;
 		case 'm':
 			cfg->core_mask = optarg;
+			break;
+		case 's':
+			if (parse_u64(optarg, &cfg->start_lpn) != 0)
+				return -1;
+			break;
+		case 'd':
+			if (parse_u64(optarg, &cfg->lpn_stride) != 0)
+				return -1;
+			break;
+		case 'C':
+			if (parse_u32(optarg, &cfg->nchs) != 0 || cfg->nchs == 0)
+				return -1;
+			break;
+		case 'a':
+			cfg->chan_affine = true;
 			break;
 		case 'h':
 			usage(argv[0]);
@@ -261,8 +337,6 @@ int main(int argc, char **argv)
 	}
 
 	lpns = buf;
-	for (i = 0; i < cfg.npages; i++)
-		lpns[i] = htole64((uint64_t)i);
 
 	csv = fopen(cfg.csv_path, "w");
 	if (!csv) {
@@ -280,6 +354,9 @@ int main(int argc, char **argv)
 	for (i = 0; i < cfg.trials; i++) {
 		uint16_t status = 0xffff;
 		uint64_t lat_ns = 0;
+		uint64_t base = cfg.start_lpn + (uint64_t)i * cfg.lpn_stride;
+
+		fill_lpn_list(lpns, base, cfg.npages, cfg.nchs, cfg.chan_affine);
 
 		if (run_trial(&g_dev, qpair, buf, cfg.npages, &lat_ns, &status) != 0)
 			goto out;

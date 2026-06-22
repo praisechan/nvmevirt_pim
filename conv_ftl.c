@@ -1000,6 +1000,10 @@ static bool conv_inflash_compute(struct nvmev_ns *ns, struct nvmev_request *req,
 	__le64 *lpns_le;
 	size_t list_len;
 	u32 i;
+	u32 ch_counts[INFLASH_PIM_MAX_CHANNELS] = { 0 };
+	u32 nchs = min_t(u32, spp->nchs, INFLASH_PIM_MAX_CHANNELS);
+	char ch_hist[256];
+	int hlen = 0;
 
 	if (requested == 0 || requested > INFLASH_PIM_MAX_PAGES || flags != 0) {
 		ret->status = NVME_SC_INVALID_FIELD;
@@ -1063,15 +1067,25 @@ static bool conv_inflash_compute(struct nvmev_ns *ns, struct nvmev_request *req,
 		nsecs_completed = ssd_advance_nand(conv_ftl->ssd, &srd);
 		nsecs_latest = max(nsecs_completed, nsecs_latest);
 		sensed++;
+
+		if (ppa.g.ch < INFLASH_PIM_MAX_CHANNELS)
+			ch_counts[ppa.g.ch]++;
 	}
 
 	ret->nsecs_target = sensed ? nsecs_latest : req->nsecs_start;
 	ret->status = NVME_SC_SUCCESS;
 	ret->result = ((u64)requested << 32) | sensed;
 
+	/* Build a per-channel sensed histogram so the FTL-aware even distribution
+	 * across the 16 channels can be read off dmesg (expect 32 per channel for
+	 * a 512-page command on the 512-LUN profile). */
+	for (i = 0; i < nchs; i++)
+		hlen += scnprintf(ch_hist + hlen, sizeof(ch_hist) - hlen,
+				  "%s%u", i ? "," : "", ch_counts[i]);
+
 	printk_ratelimited(KERN_INFO
-			   "NVMeVirt: inflash_dev_lat %llu ns (requested %u pages, sensed %u pages)\n",
-			   ret->nsecs_target - req->nsecs_start, requested, sensed);
+			   "NVMeVirt: inflash_dev_lat %llu ns (requested %u pages, sensed %u pages, ch[%u]={%s})\n",
+			   ret->nsecs_target - req->nsecs_start, requested, sensed, nchs, ch_hist);
 
 out:
 	kfree(lpns);

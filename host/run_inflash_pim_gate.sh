@@ -69,7 +69,7 @@ sudo "$IDENTIFY" -r "trtype:PCIe traddr:$BDF"
 sudo dmesg -C
 sudo taskset -c "$HOST_CPUS" host/inflash_bench_spdk --bdf "$BDF" \
     --npages "$NPAGES" --qdepth "$QDEPTH" --trials "$TRIALS" --csv "$CSV" \
-    --core-mask "$SPDK_CORE_MASK"
+    --core-mask "$SPDK_CORE_MASK" ${EXTRA_BENCH_ARGS:-}
 
 sudo dmesg | grep inflash_dev_lat | tee "$DMESG_LOG"
 ROWS="$(awk -F, 'NR > 1 { n++ } END { print n + 0 }' "$CSV")"
